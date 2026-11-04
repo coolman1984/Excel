@@ -2,6 +2,8 @@
 
 Date: 2026-11-04. All numbers were measured on this PC unless a source link is given. "Not measured" means I have no number.
 
+**Update:** the owner has since approved a saved fast copy on this laptop's local disk only. `DECISION-2-CACHE.md` replaces the "keeps nothing on disk" part below. The rest still stands.
+
 **Short answer:** COM solves *reading* a protected file, and it solves *scrolling*. It does not solve the *first opening*: the wait for Excel to open the file stays. Rust cannot build on this PC today. C# can, with nothing to install. The biggest open point is the owner's company-rule question about a saved fast copy, because that decides how much the viewer is worth.
 
 ## COM ways

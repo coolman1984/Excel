@@ -1,0 +1,6 @@
+# Fast copies hold real data and must never be committed.
+*.xvc
+*.xvc.part
+# Build output
+bin/
+obj/
