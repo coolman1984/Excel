@@ -5,6 +5,7 @@ A small Windows program for looking at very large Excel files, smoothly, on an o
 - **The first time** a file is opened, a hidden, read-only Excel reads it (big files take a few minutes) and a fast copy is saved.
 - **After that,** the file opens from the fast copy in under a second, with no Excel running.
 - Scroll, search across all rows, and sort by any column. The source file is never changed.
+- Copy cells with Ctrl+C or right-click Copy: the shown text, tab-separated, kept out of Windows clipboard history and cloud sync.
 - Dates and money show as Excel shows them. A format that cannot be matched to Excel is marked with ⚠ instead of being guessed.
 
 ## The rule

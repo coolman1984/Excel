@@ -113,3 +113,30 @@ public static class SortEngine
         return map.ToArray();
     }
 }
+
+/// <summary>Builds the text for the clipboard: tabs between columns, line breaks between rows, the way Excel pastes it.</summary>
+public static class CopyText
+{
+    public const int MaxCells = 200_000;
+
+    public static string Build(IEnumerable<(int Row, int Col)> cells, Func<int, int, string> shown)
+    {
+        var chosen = cells.ToHashSet(); if (chosen.Count == 0) return "";
+        var rows = chosen.Select(c => c.Row).Distinct().OrderBy(x => x).ToList();
+        var cols = chosen.Select(c => c.Col).Distinct().OrderBy(x => x).ToList();
+        var sb = new StringBuilder();
+        for (int r = 0; r < rows.Count; r++)
+        {
+            if (r > 0) sb.Append("\r\n");
+            for (int c = 0; c < cols.Count; c++)
+            {
+                if (c > 0) sb.Append('\t');
+                if (chosen.Contains((rows[r], cols[c]))) sb.Append(Quote(shown(rows[r], cols[c])));
+            }
+        }
+        return sb.ToString();
+    }
+
+    // A tab or line break inside a cell would split it when pasted, so such a cell is quoted, as Excel does.
+    static string Quote(string s) => s.IndexOfAny(new[] { '\t', '\n', '\r' }) < 0 ? s : "\"" + s.Replace("\"", "\"\"") + "\"";
+}

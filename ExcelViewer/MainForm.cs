@@ -18,6 +18,8 @@ public sealed class MainForm : Form
     readonly ToolStripButton cancelBtn = new("Stop") { Enabled = false };
     readonly ToolStripButton rebuildBtn = new("Read file again");
     readonly DataGridView grid = new();
+    readonly ContextMenuStrip gridMenu = new();
+    readonly ToolStripMenuItem copyItem = new("Copy");
     readonly ListView hitsList = new();
     readonly SplitContainer split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     readonly StatusStrip status = new();
@@ -45,14 +47,20 @@ public sealed class MainForm : Form
         bar.Items.AddRange(new ToolStripItem[] { openBtn, new ToolStripSeparator(), new ToolStripLabel("Sheet:"), sheetBox, headerBtn, new ToolStripSeparator(), new ToolStripLabel("Find:"), searchBox, scopeBox, searchBtn, cancelBtn, new ToolStripSeparator(), rebuildBtn });
 
         grid.Dock = DockStyle.Fill; grid.VirtualMode = true; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false; grid.AllowUserToOrderColumns = false; grid.AllowUserToResizeRows = false;
-        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; grid.MultiSelect = false; grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+        grid.SelectionMode = DataGridViewSelectionMode.RowHeaderSelect; grid.MultiSelect = true; grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
         grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing; grid.ColumnHeadersHeight = 26; grid.RowHeadersWidthSizeMode = DataGridViewRowHeadersWidthSizeMode.DisableResizing; grid.RowHeadersWidth = 70;
-        grid.BackgroundColor = SystemColors.Window; grid.BorderStyle = BorderStyle.None; grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.Disable; grid.StandardTab = true;
+        grid.BackgroundColor = SystemColors.Window; grid.BorderStyle = BorderStyle.None; grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.Disable; // our own copy below takes the shown text grid.StandardTab = true;
         grid.RowTemplate.Height = 22; grid.EnableHeadersVisualStyles = true; grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False;
         typeof(DataGridView).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(grid, true);
         grid.CellValueNeeded += (s, e) => { if (view != null) e.Value = view.Cell(MapRow(e.RowIndex), e.ColumnIndex).Text; };
         grid.CellFormatting += GridCellFormatting;
         grid.RowPostPaint += GridRowPostPaint;
+        grid.ContextMenuStrip = gridMenu; gridMenu.Items.Add(copyItem); copyItem.ShortcutKeyDisplayString = "Ctrl+C"; copyItem.Click += (s, e) => CopySelection();
+        grid.CellMouseDown += (s, e) =>
+        {
+            // A right-click on a cell outside the selection selects that cell first.
+            if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex >= 0 && !grid[e.ColumnIndex, e.RowIndex].Selected) { grid.ClearSelection(); grid.CurrentCell = grid[e.ColumnIndex, e.RowIndex]; }
+        };
         grid.ColumnHeaderMouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ClickSort(e.ColumnIndex); };
 
         hitsList.Dock = DockStyle.Fill; hitsList.View = View.Details; hitsList.FullRowSelect = true; hitsList.VirtualMode = true; hitsList.MultiSelect = false; hitsList.HideSelection = false;
@@ -82,6 +90,7 @@ public sealed class MainForm : Form
         DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
         DragDrop += (s, e) => { if (e.Data.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0) OpenFile(f[0]); };
         FormClosing += (s, e) => { CancelBuild(); searchCts?.Cancel(); sortCts?.Cancel(); };
+        FormClosed += (s, e) => { view?.Dispose(); view = null; };
         SetEmpty();
     }
 
@@ -329,6 +338,52 @@ public sealed class MainForm : Form
         grid.FirstDisplayedScrollingRowIndex = Math.Max(0, gridRow - 5);
         grid.Invalidate();
     }
+
+    // ---------- Copy ----------
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) =>
+        (grid.Focused && HandleGridKeys(keyData)) || base.ProcessCmdKey(ref msg, keyData);
+
+    public bool HandleGridKeys(Keys keys)
+    {
+        if (keys is (Keys.Control | Keys.C) or (Keys.Control | Keys.Insert)) { CopySelection(); return true; }
+        if (keys == (Keys.Control | Keys.A)) { infoLabel.Text = $"Select-all is off: it would be too heavy on a big sheet. Copy works up to {CopyText.MaxCells:N0} cells."; return true; }
+        return false;
+    }
+
+    /// <summary>The shown text of the selected cells, in the order on screen. Null if there are too many.</summary>
+    public string SelectionText()
+    {
+        if (view == null) return "";
+        int n = grid.GetCellCount(DataGridViewElementStates.Selected);
+        if (n == 0) return "";
+        if (n > CopyText.MaxCells) return null;
+        var cells = new List<(int, int)>(n);
+        foreach (DataGridViewCell c in grid.SelectedCells) cells.Add((c.RowIndex, c.ColumnIndex));
+        return CopyText.Build(cells, (row, col) => view.Cell(MapRow(row), col).Text);
+    }
+
+    public void CopySelection()
+    {
+        string text = SelectionText();
+        if (text == null) { infoLabel.Text = $"Too many cells selected. Copy works up to {CopyText.MaxCells:N0} cells."; return; }
+        if (text.Length == 0) { infoLabel.Text = "Nothing is selected."; return; }
+        try { ClipboardSink(text); infoLabel.Text = $"Copied {grid.GetCellCount(DataGridViewElementStates.Selected):N0} cell(s)."; }
+        catch (System.Runtime.InteropServices.ExternalException) { infoLabel.Text = "Windows would not let the copy go to the clipboard. Try again."; }
+    }
+
+    /// <summary>Puts text on this PC's clipboard, and asks Windows to keep it out of clipboard history and cloud sync.</summary>
+    public Action<string> ClipboardSink = text =>
+    {
+        var data = new DataObject();
+        data.SetData(DataFormats.UnicodeText, text); data.SetData(DataFormats.Text, text);
+        data.SetData("ExcludeClipboardContentFromMonitorProcessing", new MemoryStream(BitConverter.GetBytes(1)));
+        data.SetData("CanIncludeInClipboardHistory", new MemoryStream(BitConverter.GetBytes(0)));
+        data.SetData("CanUploadToCloudClipboard", new MemoryStream(BitConverter.GetBytes(0)));
+        Clipboard.SetDataObject(data, true, 5, 100);
+    };
+
+    public ToolStripMenuItem CopyMenuItem => copyItem;
 
     // ---------- For the timing run and the tests ----------
 

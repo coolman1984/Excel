@@ -11,3 +11,4 @@
 - **Memory stop:** the owner set the stop at 96% Windows commit, one setting in `Machine.StopAt`. The older speed tools in `tools` still use their own lower limits.
 - **Lessons from the real file:** sheets can hide zeros, Excel drops the minus when a negative rounds to zero, and Excel gives blank text for cells in hidden columns. All three are handled and tested on made-up data.
 - **A hang, fixed:** an old copy with the same version mark failed to load and a hidden error box waited for 19 minutes. The version mark now changes with the layout, a damaged copy is read again, and unattended runs never show a box.
+- **Copy:** the owner approved copying for their work on this laptop. Ctrl+C and right-click Copy give the shown text with number formats, tab-separated. The clipboard data asks Windows to leave it out of clipboard history and cloud sync. Both saved copies stay, and hidden rows and columns stay shown, by the owner's decision.

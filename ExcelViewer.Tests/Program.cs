@@ -13,9 +13,10 @@ static class T
     [STAThread]
     static int Main(string[] a)
     {
+        if (a.Contains("clipboard")) return RealClipboard();
         var machine = CultureInfo.CurrentCulture;
         CultureInfo.CurrentCulture = new CultureInfo("en-US");
-        Formats(); Unsupported(); Policy(); BadCopies();
+        Formats(); Unsupported(); Policy(); BadCopies(); CopyPieces();
         foreach (var (x, v, ok) in new[] { ("0.00", 0.004, true), ("0", 0.004, true), ("1235", 1234.5678, true), ("1.2E+03", 1234.5678, true), ("1234.57", 1234.5678, true), ("1234.6", 1234.5678, true), ("1235", 1500.0, false), ("5", 7.0, false), ("abc", 1.0, false) })
             Check($"General agrees: {x} for {v}", CacheBuilder.GeneralAgrees(x, v) == ok);
         Console.WriteLine($"offline: {pass} passed, {fail} failed");
@@ -91,6 +92,76 @@ static class T
                 foreach (var bad in new[] { "FileMode.Create", "File.Create", "FileAccess.Write", "File.Move", "File.Delete", "File.WriteAll", "File.Copy", "HttpClient", "WebClient", "Socket", "SaveCopyAs", ".SaveAs(" })
                     Check($"{Path.GetFileName(f)} does not use {bad}", !s.Contains(bad));
             }
+    }
+
+    // One run by hand: the real Windows clipboard, with made-up text. Runs only if the clipboard is empty or plain text, and puts that text back.
+    static int RealClipboard()
+    {
+        var CB = typeof(System.Windows.Forms.Clipboard); var now = System.Windows.Forms.Clipboard.GetDataObject();
+        var formats = now?.GetFormats() ?? Array.Empty<string>();
+        bool onlyText = formats.All(f => f is "Text" or "UnicodeText" or "System.String" or "OEMText" or "Locale");
+        if (!onlyText) { Console.WriteLine("SKIPPED: the clipboard holds more than text, and could not be put back exactly"); return 3; }
+        string before = System.Windows.Forms.Clipboard.ContainsText() ? System.Windows.Forms.Clipboard.GetText() : null;
+        using var form = new ExcelViewer.MainForm();
+        const string Want = "made-up\t$1,234.50\r\n06-Nov-2023\t12.5%";
+        form.ClipboardSink(Want);
+        string got = System.Windows.Forms.Clipboard.GetText();
+        var after = System.Windows.Forms.Clipboard.GetDataObject().GetFormats();
+        Console.WriteLine($"text came back exactly: {got == Want}");
+        foreach (var f in new[] { "ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard" }) Console.WriteLine($"{f} present: {after.Contains(f)}");
+        if (before != null) System.Windows.Forms.Clipboard.SetText(before); else System.Windows.Forms.Clipboard.Clear();
+        bool restored = before != null ? System.Windows.Forms.Clipboard.GetText() == before : !System.Windows.Forms.Clipboard.ContainsText();
+        Console.WriteLine($"clipboard put back as it was: {restored}");
+        return got == Want && restored ? 0 : 1;
+    }
+
+    static void CopyPieces()
+    {
+        string Txt(int r, int c) => $"r{r}c{c}";
+        Check("copy one cell", CopyText.Build(new[] { (3, 2) }, Txt) == "r3c2");
+        Check("copy a block: tabs and line breaks", CopyText.Build(new[] { (1, 1), (1, 2), (2, 1), (2, 2) }, Txt) == "r1c1\tr1c2\r\nr2c1\tr2c2");
+        Check("copy keeps screen order, whatever the click order", CopyText.Build(new[] { (2, 2), (1, 1), (2, 1), (1, 2) }, Txt) == "r1c1\tr1c2\r\nr2c1\tr2c2");
+        Check("copy keeps a gap for unselected cells", CopyText.Build(new[] { (1, 1), (2, 2) }, Txt) == "r1c1\t\r\n\tr2c2");
+        Check("copy nothing", CopyText.Build(Array.Empty<(int, int)>(), Txt) == "");
+        Check("a tab or line break inside a cell is quoted", CopyText.Build(new[] { (0, 0), (0, 1) }, (r, c) => c == 0 ? "a\tb" : "say \"x\"\ny") == "\"a\tb\"\t\"say \"\"x\"\"\ny\"");
+    }
+
+    // The real grid, off screen, with the clipboard swapped for a list so the owner's clipboard is not touched.
+    static void CopyInWindow(string cachePath, List<(int row, int col, string text, string note)> want, CacheData c)
+    {
+        using var form = new ExcelViewer.MainForm { Unattended = true }; form.PlaceOffScreen();
+        var got = new List<string>(); form.ClipboardSink = got.Add;
+        form.Show(); form.LoadForTest(cachePath); System.Windows.Forms.Application.DoEvents();
+        var g = form.Grid; int bix = c.Sheets.FindIndex(x => x.Name == "Formats");
+        form.ShowSheet(bix); System.Windows.Forms.Application.DoEvents();
+        Check("the grid can select single cells", g.SelectionMode == System.Windows.Forms.DataGridViewSelectionMode.RowHeaderSelect && g.MultiSelect);
+
+        // The first rows hold dates and money. Excel's own text is the expected answer.
+        var first = want.Where(w => w.row < 3).OrderBy(w => w.row).ToList(); int off = form.FirstDataRow;
+        g.ClearSelection(); g[1, first[0].row - off].Selected = true;
+        Check("copy returns the shown text of one cell", Clean(form.SelectionText()) == Clean(first[0].text), $"'{form.SelectionText()}' want '{first[0].text}'");
+        form.HandleGridKeys(System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.C);
+        Check("Ctrl+C copies", got.Count == 1 && Clean(got[0]) == Clean(first[0].text));
+        got.Clear(); form.CopyMenuItem.PerformClick();
+        Check("right-click Copy copies", got.Count == 1 && Clean(got[0]) == Clean(first[0].text));
+
+        g.ClearSelection(); for (int r = 0; r < 3; r++) { g[0, first[r].row - off].Selected = true; g[1, first[r].row - off].Selected = true; }
+        var lines = (form.SelectionText() ?? "").Split("\r\n");
+        Check("copy a block has one line per row", lines.Length == 3, $"{lines.Length} lines");
+        for (int r = 0; r < Math.Min(3, lines.Length); r++)
+        {
+            var cells = lines[r].Split('\t');
+            Check($"block row {r + 1} is tab-separated with the shown date or money", cells.Length == 2 && cells[0] == "label " + (first[r].row + 1) && Clean(cells[1]) == Clean(first[r].text), $"'{lines[r]}' want '{first[r].text}'");
+        }
+
+        // After a sort, copy must follow what is on the screen.
+        int big = c.Sheets.FindIndex(x => x.Name == "Big"); form.ShowSheet(big); System.Windows.Forms.Application.DoEvents();
+        form.RowMap = SortEngine.Sort(c, c.Sheets[big], 1, true, form.FirstDataRow, CancellationToken.None); form.Redraw();
+        g.ClearSelection(); g[1, 0].Selected = true; string top = form.SelectionText();
+        using (var rd = new SheetReader(c, c.Sheets[big])) Check("copy follows the sorted order, with its format", top == rd.Cell(form.RowMap[0], 1).Text && top.Contains('.'), $"'{top}'");
+        g.ClearSelection(); got.Clear(); form.CopySelection(); Check("nothing selected copies nothing", got.Count == 0);
+        Check("select-all is blocked", form.HandleGridKeys(System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.A) && g.GetCellCount(System.Windows.Forms.DataGridViewElementStates.Selected) == 0);
+        form.Close();
     }
 
     // An older or damaged copy must never stop the viewer. This is what once hung a run.
@@ -210,6 +281,8 @@ static class T
             // A changed source makes the copy stale.
             File.SetLastWriteTimeUtc(src, srcTime.AddMinutes(1)); Check("changed file means the copy is not fresh", !CacheData.HeaderMatches(cachePath, src));
             File.SetLastWriteTimeUtc(src, srcTime); Check("same file again is fresh", CacheData.HeaderMatches(cachePath, src));
+
+            CopyInWindow(cachePath, want, c);
 
             // Closing the viewer stops the reader, which closes its own Excel.
             fmtView.Dispose(); bv.Dispose(); CancelTest(src, cachePath);
