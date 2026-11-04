@@ -31,7 +31,7 @@ Two more things never change:
 5. **While the rest loads:** the screen stays usable. If the person jumps to a place not yet read, that block goes to the front of the queue (median 41 ms, worst 56 ms).
 6. **When all rows are in:** the reader closes its Excel and ends. This is the add-on idea: at 6 million cells, Excel's 308 MB goes away and the viewer holds the data in 140 MB.
 7. **If the viewer closes early:** the pipe breaks, the reader notices, and it closes its own Excel. Tested: closed with 109 of 300 blocks read, and Excel left in 1.5 s. Excel is never killed.
-8. **Memory guard:** the reader checks Windows commit before every block. It waits at 85% and stops at 90%, and deletes any half-written cache. The owner can turn the wait off for one run (`--stop-only-at-90`); the stop at 90% stays on. Excel itself can hold commit above 85% once a big file is open, so check memory before opening too. Once Excel is opening a file it cannot be interrupted, because it is never killed.
+8. **Memory guard:** the reader checks Windows commit before every block. It waits at 85% and stops at 90%, and deletes any half-written cache. The owner can turn the wait off for one run (`--stop-only-at-90`); the stop at 90% stays on. The viewer itself, built later, has no wait and stops at 96%, as the owner decided. Excel itself can hold commit above 85% once a big file is open, so check memory before opening too. Once Excel is opening a file it cannot be interrupted, because it is never killed.
 
 ### Search and sort
 - They run in the background on the viewer's copy, not in Excel, so Excel's "one request at a time" no longer blocks the screen. They can be cancelled, and they cover what has loaded so far, with progress shown.
@@ -43,7 +43,7 @@ The Windows Forms `DataGridView` in virtual mode is Microsoft's official way: th
 ### Export for reports
 Export goes back through Excel: the reader opens its hidden Excel, writes the chosen rows into a new workbook, and saves. Everything Excel saves here came out protected (see below), so a report keeps its NASCA protection. The viewer never writes its own Excel or CSV file, because that would come out plain.
 
-### A known gap: how numbers look
+### How numbers look (solved in the viewer: see `HISTORY.md`)
 `Value2` gives raw values, so a date arrives as a number ([Microsoft](https://learn.microsoft.com/en-us/office/vba/api/excel.range.value2)). The formatted text property works one cell at a time in practice ([Microsoft](https://learn.microsoft.com/en-us/office/vba/api/excel.range.text)), and reading cell by cell is far too slow. Plan: read each column's number format once and apply it in the viewer. Not built or measured. Colours and formulas are not shown either.
 
 ## Format chosen and why

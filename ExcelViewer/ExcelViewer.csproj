@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>LatestMajor</RollForward>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>false</TieredPGO>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>CA1416;WFO1000;WFAC010</NoWarn>
+    <AssemblyName>ExcelViewer</AssemblyName>
+    <RootNamespace>ExcelViewer</RootNamespace>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);app\**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

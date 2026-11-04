@@ -4,3 +4,8 @@
 # Build output
 bin/
 obj/
+app/
+# Pictures could show real data
+screenshots/
+# The shortcut holds this PC's paths
+*.lnk
