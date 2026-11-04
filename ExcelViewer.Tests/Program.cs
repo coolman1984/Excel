@@ -360,7 +360,7 @@ static class T
             for (int r = 1; r <= 5; r++) ZeroSheet.Add((string)z.Cells[r, 1].Text);
             f.Activate();
             wb.SaveAs(path, 51); wb.Close(false);
-            Marshal.FinalReleaseComObject(b); Marshal.FinalReleaseComObject(f); Marshal.FinalReleaseComObject(wb);
+            Marshal.FinalReleaseComObject(z); Marshal.FinalReleaseComObject(b); Marshal.FinalReleaseComObject(f); Marshal.FinalReleaseComObject(wb);
         }
         finally { xl.Quit(); Marshal.FinalReleaseComObject(xl); xl = null; GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }
         return want;
