@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>LatestMajor</RollForward>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>false</TieredPGO>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>CA1416;WFO1000;WFAC010;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8625;CS8632;CS8767;MSB3277</NoWarn>
+    <AssemblyName>ExcelApp</AssemblyName>
+    <RootNamespace>ExcelApp</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <DefaultItemExcludes>$(DefaultItemExcludes);app\**;ui\**;ui-stub\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ExcelViewer\ExcelViewer.csproj" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+</Project>

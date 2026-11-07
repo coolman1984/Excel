@@ -1,0 +1,211 @@
+// Modes: (none) window; --build <file>; --save; --selftest <made-up file> <png folder>; --dev <url>.
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Text;
+using ExcelViewer.Core;
+
+namespace ExcelApp;
+
+static class Program
+{
+    [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+
+    [STAThread]
+    static int Main(string[] a)
+    {
+        SetErrorMode(0x8003); // no Windows error box, ever
+        bool unattended = a.Length >= 1 && a[0] is "--build" or "--save" or "--selftest";
+        try
+        {
+            if (a.Length >= 2 && a[0] == "--build") return BuildMode(a[1]);
+            if (a.Length >= 1 && a[0] == "--save")
+            {
+                using var o = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+                return SaveBack.Run(Console.In, o);
+            }
+            ApplicationConfiguration.Initialize();
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                Log.Write("ui thread error " + e.Exception.GetType().Name);
+                if (unattended) { Console.WriteLine("ERROR " + e.Exception.GetType().Name); Environment.Exit(1); }
+                MessageBox.Show("Something went wrong (" + e.Exception.GetType().Name + "). Your file is not changed.", "ExcelApp");
+            };
+            if (a.Length >= 3 && a[0] == "--selftest") return SelfTest(a[1], a[2]);
+            string? dev = null, file = null;
+            if (a.Length >= 2 && a[0] == "--dev") dev = a[1];
+            else if (a.Length >= 1 && File.Exists(a[0])) file = a[0];
+            var f = new MainForm(dev) { OpenOnStart = file };
+            Application.Run(f);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            try { Log.Write("fatal " + e.GetType().Name); } catch (Exception) { }
+            if (unattended) Console.WriteLine("ERROR " + e.GetType().Name);
+            else try { MessageBox.Show("ExcelApp could not start (" + e.GetType().Name + ").", "ExcelApp"); } catch (Exception) { }
+            return 1;
+        }
+    }
+
+    static int BuildMode(string source)
+    {
+        using var o = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+        bool gone = false;
+        new Thread(() => { try { while (Console.In.ReadLine() != null) { } } catch (IOException) { } gone = true; }) { IsBackground = true }.Start();
+        var r = CacheBuilder.Build(source, CachePolicy.PathFor(source), o.WriteLine, () => gone);
+        o.WriteLine(string.Create(CultureInfo.InvariantCulture, $"RESULT code={r.Code} stopped={r.Stopped} excelStart={r.ExcelStartSec:F1}s open={r.OpenSec:F1}s formats={r.FormatSec:F1}s read={r.ReadSec:F1}s check={r.VerifySec:F1}s sheets={r.Sheets} cells={r.Cells} cacheMB={r.CacheBytes / 1048576.0:F1} formatsTotal={r.Formats} formatsMatched={r.FormatsOk} formatsNotCarried={r.FormatsFailed} formatsNoCells={r.FormatsUnused} unreadFormatRuns={r.UnreadRuns} peakExcelMB={r.PeakExcelMB} peakCommit={r.PeakCommit:F1}%"));
+        return r.Code;
+    }
+
+    // ---- self test: the real window, off screen, driven through window.__app. Made-up files only. ----
+    static long WebViewMB(MainForm f)
+    {
+        long total = 0;
+        try
+        {
+            foreach (var info in f.View.CoreWebView2.Environment.GetProcessInfos())
+                try { using var p = Process.GetProcessById(info.ProcessId); total += p.PrivateMemorySize64; } catch (ArgumentException) { }
+        }
+        catch (Exception) { return -1; }
+        return total / 1048576;
+    }
+
+    static int SelfTest(string source, string folder)
+    {
+        if (!Path.GetFileName(source).StartsWith("syn", StringComparison.OrdinalIgnoreCase)) { Console.WriteLine("REFUSED: the self test is for made-up files only"); return 2; }
+        Directory.CreateDirectory(folder);
+        double fromStart = 0; int code = 0;
+        var form = new MainForm { Unattended = true }; form.PlaceOffScreen(); form.ClientSize = new Size(1280, 760);
+        form.Shown += async (s, e) =>
+        {
+            try { code = await RunSelfTest(form, source, folder); }
+            catch (Exception ex) { Console.WriteLine("ERROR " + ex.GetType().Name); code = 1; }
+            form.Close();
+        };
+        Application.Run(form);
+        _ = fromStart; return code;
+    }
+
+    static async Task<string> Js(MainForm f, string script)
+    {
+        string r = await f.View.CoreWebView2.ExecuteScriptAsync(script);
+        return r.Trim('"');
+    }
+
+    static async Task<bool> WaitJs(MainForm f, string expr, string want, double seconds)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed.TotalSeconds < seconds) { if (await Js(f, expr) == want) return true; await Task.Delay(50); }
+        return false;
+    }
+
+    static async Task Shot(MainForm f, string png)
+    {
+        using var ms = new MemoryStream();
+        await f.View.CoreWebView2.CapturePreviewAsync(Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat.Png, ms);
+        File.WriteAllBytes(png, ms.ToArray());
+    }
+
+    static async Task<int> RunSelfTest(MainForm f, string source, string folder)
+    {
+        var proc = Process.GetCurrentProcess();
+        if (!await f.Ready) { Console.WriteLine("ERROR the page did not load"); return 1; }
+        if (!await WaitJs(f, "typeof window.__app", "object", 30)) { Console.WriteLine("ERROR the interface has no self-test hooks"); return 1; }
+        if (!await WaitJs(f, "window.__app.state()", "empty", 30)) { Console.WriteLine("ERROR the interface did not reach the empty state"); return 1; }
+        double pageMs = (DateTime.Now - proc.StartTime).TotalMilliseconds;
+        string cp = CachePolicy.PathFor(source);
+        if (!CacheData.HeaderMatches(cp, source)) Console.WriteLine("NOTE no fresh copy yet: this run includes Excel reading the file");
+        var sw = Stopwatch.StartNew();
+        f.Session.Open(source);
+        if (!await WaitJs(f, "window.__app.state()", "ready", 400)) { Console.WriteLine("ERROR the file did not open"); return 1; }
+        double total = (DateTime.Now - proc.StartTime).TotalMilliseconds;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"FIRST SCREEN {total:F0} ms from process start (page ready at {pageMs:F0} ms, open to screen {sw.Elapsed.TotalMilliseconds:F0} ms)"));
+        await Task.Delay(300); await Shot(f, Path.Combine(folder, "open.png"));
+        var wb = (dynamic)f.Session.WorkbookInfo(); int rows = f.Session.Cache!.Sheets.Max(x => x.Rows);
+
+        var rnd = new Random(7); var t = new List<double>();
+        for (int i = 0; i < 10; i++)
+        {
+            int row = rnd.Next(0, Math.Max(1, rows - 40));
+            string before = await Js(f, "String(window.__app.lastPaintMs)"); var s2 = Stopwatch.StartNew();
+            await Js(f, $"window.__app.scrollTo({row}); 'x'");
+            // The UI sets lastPaintMs when the jump has been painted with its data.
+            while (s2.Elapsed.TotalSeconds < 5 && await Js(f, "String(window.__app.lastPaintMs)") == before) await Task.Delay(2);
+            t.Add(s2.Elapsed.TotalMilliseconds);
+        }
+        t.Sort(); Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"JUMP median {t[t.Count / 2]:F0} ms, p95 {t[(int)(t.Count * 0.95)]:F0} ms, worst {t[^1]:F0} ms"));
+        proc.Refresh(); Console.WriteLine($"MEMORY host {proc.PrivateMemorySize64 / 1048576} MB");
+        Console.WriteLine($"MEMORY webview {WebViewMB(f)} MB");
+
+        await Js(f, "window.__app.run('freeze', 2, 1); window.__app.run('zoom', 150); 'x'"); await Task.Delay(500);
+        await Shot(f, Path.Combine(folder, "view.png"));
+        await Js(f, "window.__app.run('zoom', 100); 'x'");
+        await Js(f, "window.__app.run('select', 1, 1, 3, 2); window.__app.run('style', [1,1,3,2], {bold:true, fill:'#FFFF00', align:1, numberFormat:'0.00%'}); 'x'"); await Task.Delay(500);
+        await Shot(f, Path.Combine(folder, "styles.png"));
+        // Host-side timings through the same bridge the interface uses.
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var prior = f.Bridge.Post; f.Bridge.Post = j => { seen.Enqueue(j); prior?.Invoke(j); };
+        int id = 1000;
+        async Task<System.Text.Json.JsonElement> Cmd(string cmd, string args = "")
+        {
+            string reply = await f.Bridge.Dispatch("{\"id\":" + (id++) + ",\"cmd\":\"" + cmd + "\"" + (args.Length > 0 ? "," + args : "") + "}");
+            using var doc = System.Text.Json.JsonDocument.Parse(reply);
+            if (!doc.RootElement.GetProperty("ok").GetBoolean()) throw new InvalidOperationException(cmd);
+            return doc.RootElement.GetProperty("result").Clone();
+        }
+        async Task<bool> WaitEvent(string name, double secs)
+        {
+            var w = Stopwatch.StartNew();
+            while (w.Elapsed.TotalSeconds < secs) { foreach (var j in seen) if (j.Contains("\"event\":\"" + name + "\"")) return true; await Task.Delay(20); }
+            return false;
+        }
+        var cache = f.Session.Cache!; int big = 0; for (int i = 0; i < cache.Sheets.Count; i++) if (cache.Sheets[i].Cells > cache.Sheets[big].Cells) big = i;
+        await Cmd("sheet", $"\"sheet\":{big}");
+        int numCol = -1, textCol = -1; { var cells = (await Cmd("rows", $"\"sheet\":{big},\"from\":1,\"count\":1")).GetProperty("rows")[0][1];
+            for (int k = 0; k < cells.GetArrayLength(); k++) { int kind = cells[k][1].GetInt32(); if (kind == 1 && numCol < 0) numCol = k; if (kind == 2 && textCol < 0) textCol = k; } }
+        if (textCol >= 0)
+        {
+            var fv = await Cmd("filterValues", $"\"sheet\":{big},\"col\":{textCol}");
+            string first = fv.GetProperty("values")[0].GetProperty("text").GetString()!;
+            string valuesJson = System.Text.Json.JsonSerializer.Serialize(new[] { first });
+            await Js(f, $"window.__app.run('filter', {textCol + 1}, {valuesJson}); 'x'"); await Task.Delay(1500);
+            await Shot(f, Path.Combine(folder, "filter.png"));
+            await Cmd("clearFilters", $"\"sheet\":{big}");
+        }
+        if (numCol >= 0)
+        {
+            var w = Stopwatch.StartNew();
+            var r = await Cmd("setFilter", $"\"sheet\":{big},\"col\":{numCol},\"condition\":{{\"kind\":\"number\",\"op\":\"gt\",\"a\":5000}}");
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"FILTER one column: {w.Elapsed.TotalMilliseconds:F0} ms, {r.GetProperty("viewRows").GetInt32():N0} rows shown"));
+            await Cmd("clearFilters", $"\"sheet\":{big}");
+            w.Restart(); await Cmd("setSort", $"\"sheet\":{big},\"keys\":[{{\"col\":{numCol},\"desc\":false}}]");
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"SORT one column: {w.Elapsed.TotalMilliseconds:F0} ms"));
+            await Cmd("setSort", $"\"sheet\":{big},\"keys\":[]");
+        }
+        { var w = Stopwatch.StartNew(); while (seen.TryDequeue(out _)) { }
+          await Cmd("find", "\"sheet\":-1,\"query\":\"NO-SUCH-VALUE-ZZZ\"");
+          bool ok = await WaitEvent("findDone", 120);
+          Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"FIND nothing found, every sheet: {w.Elapsed.TotalSeconds:F2} s{(ok ? "" : " (timed out)")}")); }
+        Console.WriteLine($"MEMORY host after work {Process.GetCurrentProcess().PrivateMemorySize64 / 1048576} MB");
+
+        // A save round trip of 100 edits on the smaller made-up file, from the save command to the reopened workbook.
+        string small = Path.Combine(Path.GetDirectoryName(source)!, "syn-2m.xlsx");
+        if (File.Exists(small))
+        {
+            while (seen.TryDequeue(out _)) { }
+            f.Session.Open(small);
+            if (!await WaitEvent("opened", 400)) { Console.WriteLine("ERROR the small file did not open"); return 1; }
+            await Task.Delay(300); while (seen.TryDequeue(out _)) { }
+            for (int i = 0; i < 100; i++) await Cmd("setCell", $"\"sheet\":0,\"row\":{i + 1},\"col\":0,\"input\":\"{i}\"");
+            var w = Stopwatch.StartNew();
+            await Cmd("save", "\"saveAs\":false");
+            bool ok = await WaitEvent("opened", 300);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"SAVE 100 edits on the small file, save to reopened: {w.Elapsed.TotalSeconds:F1} s{(ok ? "" : " (no reopen)")}"));
+            Console.WriteLine("SAVE file kept NASCA mark: " + (File.ReadAllBytes(small).Take(8).SequenceEqual(Encoding.ASCII.GetBytes("<## NASC")) ? "yes" : "no"));
+        }
+        Console.WriteLine("SELFTEST done");
+        return 0;
+    }
+}

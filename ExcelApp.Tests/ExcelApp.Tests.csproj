@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>LatestMajor</RollForward>
+    <NoWarn>CA1416;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8625;CS8632;CS8767;MSB3277</NoWarn>
+    <AssemblyName>ExcelApp.Tests</AssemblyName>
+    <RootNamespace>ExcelAppTests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ExcelApp\ExcelApp.csproj" />
+  </ItemGroup>
+</Project>
