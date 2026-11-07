@@ -114,7 +114,7 @@ function paintText(ctx: CanvasRenderingContext2D, rect: Rectangle, cell: ExcelCe
     ctx.fillStyle = st?.fontColor ?? cell.themeOverride?.textDark ?? theme.textDark;
     ctx.textBaseline = "middle";
     ctx.textAlign = cell.contentAlign ?? "left";
-    const text = fitCellText(cell.displayData, cell.excelKind ?? 2, rect.width, s => ctx.measureText(s).width);
+    const text = fitCellText(cell.displayData, cell.excelKind ?? 2, rect.width, s => ctx.measureText(s).width, st?.numberFormat);
     const x = cell.contentAlign === "right" ? rect.x + rect.width - 4 : cell.contentAlign === "center" ? rect.x + rect.width / 2 : rect.x + 4;
     ctx.fillText(text, x, rect.y + rect.height / 2);
     if (st?.underline) {

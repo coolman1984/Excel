@@ -18,3 +18,4 @@ ExcelApp/ui/node_modules/
 ExcelApp/ui/dist/
 *.log
 ExcelApp/ui/.shots/
+.pnpm-store/
