@@ -25,6 +25,8 @@ public static class CachePolicy
     public static string PathFor(string source) =>
         Path.Combine(Folder, Sha(Path.GetFullPath(source).ToUpperInvariant())[..32] + ".xvc");
 
+    public static string SidecarPathFor(string source) => Path.ChangeExtension(PathFor(source), ".xvs");
+
     /// <summary>Throws unless this path is a file directly in the approved folder, on this laptop's fixed disk.</summary>
     public static void Validate(string path)
     {
@@ -32,7 +34,7 @@ public static class CachePolicy
         string full = Path.GetFullPath(path);
         if (!string.Equals(Path.GetDirectoryName(full), Folder, StringComparison.OrdinalIgnoreCase))
             throw new CachePolicyException("A cache may only be written to the approved local folder.");
-        if (!(full.EndsWith(".xvc", StringComparison.OrdinalIgnoreCase) || full.EndsWith(".xvc.part", StringComparison.OrdinalIgnoreCase)))
+        if (!(full.EndsWith(".xvc", StringComparison.OrdinalIgnoreCase) || full.EndsWith(".xvc.part", StringComparison.OrdinalIgnoreCase) || full.EndsWith(".xvs", StringComparison.OrdinalIgnoreCase) || full.EndsWith(".xvs.part", StringComparison.OrdinalIgnoreCase)))
             throw new CachePolicyException("Only cache files may be written to the approved folder.");
         if (string.Equals(Path.GetFileName(full), KeptTestCopy, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(Path.GetFileName(full), KeptTestCopy + ".part", StringComparison.OrdinalIgnoreCase))

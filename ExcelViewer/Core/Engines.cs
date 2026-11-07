@@ -80,37 +80,45 @@ public static class SortEngine
     /// <summary>A new order of rows. Numbers, then text, then TRUE/FALSE, then errors, with empty cells always last.</summary>
     public static int[] Sort(CacheData cache, SheetInfo d, int col, bool descending, int firstDataRow, CancellationToken token)
     {
-        var nums = new List<(double v, int row)>(); var texts = new List<(string v, int row)>(); var bools = new List<(double v, int row)>(); var errs = new List<(double v, int row)>(); var empty = new List<int>();
-        using (var rd = new SheetReader(cache, d))
-            for (int ci = 0; ci < d.Chunks.Count; ci++)
-            {
-                token.ThrowIfCancellationRequested();
-                var c = rd.LoadColumn(ci, col); int n = rd.RowsInChunk(ci), r0 = ci * d.BlockRows;
-                for (int i = 0; i < n; i++)
-                {
-                    int row = r0 + i; if (row < firstDataRow) continue;
-                    switch (c.KindAt(i))
-                    {
-                        case CellKind.Number: nums.Add((c.Nums[i], row)); break;
-                        case CellKind.Text: { string t = c.TextAt(i); if (t.Length == 0) empty.Add(row); else texts.Add((t, row)); break; }
-                        case CellKind.Bool: bools.Add((c.Nums[i], row)); break;
-                        case CellKind.Error: errs.Add((c.Nums[i], row)); break;
-                        default: empty.Add(row); break;
-                    }
-                }
-            }
+        return Sort(cache, d, col, descending, Enumerable.Range(firstDataRow, Math.Max(0, d.Rows - firstDataRow)).ToArray(), token);
+    }
+
+    /// <summary>Stable in the supplied row order, including ties and empty cells.</summary>
+    public static int[] Sort(CacheData cache, SheetInfo d, int col, bool descending, IReadOnlyList<int> rows, CancellationToken token)
+    {
         token.ThrowIfCancellationRequested();
-        // Ties keep their original order, in both directions.
-        Comparison<(double v, int row)> nAsc = (a, b) => { int x = a.v.CompareTo(b.v); return x != 0 ? x : a.row.CompareTo(b.row); };
-        Comparison<(double v, int row)> nDesc = (a, b) => { int x = b.v.CompareTo(a.v); return x != 0 ? x : a.row.CompareTo(b.row); };
-        Comparison<(string v, int row)> tAsc = (a, b) => { int x = string.Compare(a.v, b.v, StringComparison.OrdinalIgnoreCase); return x != 0 ? x : a.row.CompareTo(b.row); };
-        Comparison<(string v, int row)> tDesc = (a, b) => { int x = string.Compare(b.v, a.v, StringComparison.OrdinalIgnoreCase); return x != 0 ? x : a.row.CompareTo(b.row); };
-        nums.Sort(descending ? nDesc : nAsc); texts.Sort(descending ? tDesc : tAsc); bools.Sort(descending ? nDesc : nAsc); errs.Sort(descending ? nDesc : nAsc);
-        var map = new List<int>(d.Rows);
-        if (!descending) { map.AddRange(nums.Select(x => x.row)); map.AddRange(texts.Select(x => x.row)); map.AddRange(bools.Select(x => x.row)); map.AddRange(errs.Select(x => x.row)); }
-        else { map.AddRange(errs.Select(x => x.row)); map.AddRange(bools.Select(x => x.row)); map.AddRange(texts.Select(x => x.row)); map.AddRange(nums.Select(x => x.row)); }
-        map.AddRange(empty);
-        return map.ToArray();
+        if (col < 0 || col >= d.Cols) throw new ArgumentOutOfRangeException(nameof(col));
+        foreach (int row in rows) if (row < 0 || row >= d.Rows) throw new ArgumentOutOfRangeException(nameof(rows));
+        if (rows.Count == 0) return Array.Empty<int>();
+        var values = new (int row, int order, byte kind, double num, string text)[rows.Count];
+        using var rd = new SheetReader(cache, d);
+        // Read each chunk once; the order field preserves an earlier sort's ties.
+        foreach (var group in rows.Select((row, order) => (row, order)).GroupBy(x => x.row / d.BlockRows))
+        {
+            token.ThrowIfCancellationRequested();
+            var chunk = rd.LoadColumn(group.Key, col);
+            foreach (var item in group)
+            {
+                if (item.row < 0 || item.row >= d.Rows) throw new ArgumentOutOfRangeException(nameof(rows));
+                int i = item.row % d.BlockRows; byte kind = chunk.KindAt(i);
+                string text = kind == CellKind.Text ? chunk.TextAt(i) : null;
+                if (text == "") kind = CellKind.Empty;
+                values[item.order] = (item.row, item.order, kind, chunk.Nums == null ? 0 : chunk.Nums[i], text);
+            }
+        }
+        Array.Sort(values, (a, b) => {
+            int cmp;
+            if (a.kind == CellKind.Empty || b.kind == CellKind.Empty)
+                cmp = a.kind == b.kind ? 0 : a.kind == CellKind.Empty ? 1 : -1;
+            else {
+                cmp = a.kind.CompareTo(b.kind);
+                if (cmp == 0) cmp = a.kind == CellKind.Text ? string.Compare(a.text, b.text, StringComparison.OrdinalIgnoreCase) : a.num.CompareTo(b.num);
+                if (descending) cmp = -cmp;
+            }
+            return cmp == 0 ? a.order.CompareTo(b.order) : cmp;
+        });
+        token.ThrowIfCancellationRequested();
+        return values.Select(x => x.row).ToArray();
     }
 }
 

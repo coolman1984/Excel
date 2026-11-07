@@ -32,38 +32,63 @@ public static class CacheBuilder
     sealed class SampleSet { public List<Sample> List = new(); public bool Neg, Zero, Frac, Pos; public int TextCount; }
 
     public static BuildResult Build(string source, string cachePath, Action<string> report, Func<bool> cancelled)
+        => Build(source, cachePath, report, cancelled, null);
+
+    public static BuildResult Build(string source, string cachePath, Action<string> report, Func<bool> cancelled,
+        Action<object, object, CacheData> afterRead)
     {
-        var res = new BuildResult();
-        CachePolicy.Validate(cachePath); // refuse before Excel even starts
-        string part = cachePath + ".part"; CachePolicy.Validate(part); CachePolicy.EnsureFolderLocked();
-        if (Machine.Commit() >= Machine.StopAt) { res.Code = 90; res.Stopped = "memory"; return res; }
-
-        var src = new FileInfo(source); long srcLen = src.Length, srcTicks = src.LastWriteTimeUtc.Ticks;
-        int xpid = 0; bool sampling = true, stop = false;
-        var sampler = new Thread(() =>
-        {
-            while (Volatile.Read(ref sampling))
-            {
-                res.PeakExcelMB = Math.Max(res.PeakExcelMB, Machine.PrivateMB(xpid)); double c = Machine.Commit(); res.PeakCommit = Math.Max(res.PeakCommit, c);
-                if (c >= Machine.StopAt) stop = true;
-                Thread.Sleep(500);
-            }
-        }) { IsBackground = true }; sampler.Start();
-
-        var sw = Stopwatch.StartNew();
-        report("OPENING");
-        dynamic xl = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application"));
-        dynamic wb = null;
+        CachePolicy.Validate(cachePath);
+        if (Machine.Commit() >= Machine.StopAt) return new BuildResult { Code = 90, Stopped = "memory" };
+        dynamic xl = null, wb = null;
+        var sw = Stopwatch.StartNew(); double started = 0, opened = 0;
         try
         {
+            report("OPENING");
+            xl = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application"));
             xl.Visible = false; xl.DisplayAlerts = false; xl.AutomationSecurity = 3; xl.ScreenUpdating = false; xl.EnableEvents = false;
-            Machine.GetWindowThreadProcessId(new IntPtr((long)xl.Hwnd), out uint pid); xpid = (int)pid;
-            res.ExcelStartSec = sw.Elapsed.TotalSeconds; sw.Restart();
+            started = sw.Elapsed.TotalSeconds; sw.Restart();
             wb = xl.Workbooks.Open(source, 0, true);
-            res.OpenSec = sw.Elapsed.TotalSeconds; report("OPENED");
-            if (stop || cancelled()) { res.Code = stop ? 90 : 2; res.Stopped = stop ? "memory" : "cancelled"; return res; }
+            opened = sw.Elapsed.TotalSeconds; report("OPENED");
+            var result = BuildFromOpenWorkbook((object)xl, (object)wb, source, cachePath, report, cancelled, afterRead);
+            result.ExcelStartSec = started; result.OpenSec = opened; return result;
+        }
+        catch (Exception e) when (e is COMException or IOException or InvalidCastException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+        { return new BuildResult { Code = 1, Stopped = e.GetType().Name }; }
+        finally
+        {
+            try { if (wb != null) wb.Close(false); } catch (COMException) { }
+            try { if (xl != null) xl.Quit(); } catch (COMException) { }
+            if (wb != null && Marshal.IsComObject(wb)) Marshal.FinalReleaseComObject(wb);
+            if (xl != null && Marshal.IsComObject(xl)) Marshal.FinalReleaseComObject(xl);
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        }
+    }
 
-            var cache = new CacheData { SourceLength = srcLen, SourceTicks = srcTicks, Date1904 = (bool)wb.Date1904 };
+    /// <summary>Reads an owned open workbook; the caller keeps responsibility for closing Excel.</summary>
+    public static BuildResult BuildFromOpenWorkbook(object excelApp, object workbook, string source, string cachePath,
+        Action<string> report, Func<bool> cancelled, Action<object, object, CacheData> afterRead = null)
+    {
+        CachePolicy.Validate(cachePath);
+        string part = cachePath + ".part"; CachePolicy.Validate(part);
+        var res = new BuildResult();
+        if (Machine.Commit() >= Machine.StopAt) { res.Code = 90; res.Stopped = "memory"; return res; }
+        dynamic xl = excelApp, wb = workbook;
+        var src = new FileInfo(source); long srcLen = src.Length, srcTicks = src.LastWriteTimeUtc.Ticks;
+        int xpid = 0; bool sampling = true, stop = false;
+        Machine.GetWindowThreadProcessId(new IntPtr((long)xl.Hwnd), out uint pid); xpid = (int)pid;
+        var sampler = new Thread(() => {
+            while (Volatile.Read(ref sampling)) {
+                res.PeakExcelMB = Math.Max(res.PeakExcelMB, Machine.PrivateMB(xpid));
+                double c = Machine.Commit(); res.PeakCommit = Math.Max(res.PeakCommit, c);
+                if (c >= Machine.StopAt) Volatile.Write(ref stop, true);
+                Thread.Sleep(500);
+            }
+        }) { IsBackground = true };
+        sampler.Start(); var sw = Stopwatch.StartNew();
+        try
+        {
+            if (cancelled()) { res.Code = 2; res.Stopped = "cancelled"; return res; }
+            var cache = new CacheData { Path = cachePath, SourceLength = srcLen, SourceTicks = srcTicks, Date1904 = (bool)wb.Date1904 };
             cache.Formats.Add(new FormatEntry { Code = "General" });
             var ids = new Dictionary<string, int>(StringComparer.Ordinal) { ["General"] = 0 };
 
@@ -98,7 +123,7 @@ public static class CacheBuilder
                 var d = cache.Sheets[s]; dynamic ws = sheets[s]; d.ColWidths = new float[d.Cols]; d.RunStart = new int[d.Cols][]; d.RunFmt = new int[d.Cols][];
                 for (int k = 0; k < d.Cols; k++)
                 {
-                    if (stop || cancelled()) { res.Code = stop ? 90 : 2; res.Stopped = stop ? "memory" : "cancelled"; return res; }
+                    if (Machine.Commit() >= Machine.StopAt || stop || cancelled()) { res.Code = stop ? 90 : 2; res.Stopped = stop ? "memory" : "cancelled"; return res; }
                     string col = Letters(d.FirstCol + k);
                     try { d.ColWidths[k] = (float)(double)ws.Columns[d.FirstCol + k].ColumnWidth; } catch (COMException) { d.ColWidths[k] = 10; } catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException) { d.ColWidths[k] = 10; }
                     var runs = new List<(int start, int fmt)>();
@@ -117,10 +142,10 @@ public static class CacheBuilder
                 w.Write(Encoding.ASCII.GetBytes(CacheData.Magic)); w.Write(srcLen); w.Write(srcTicks);
                 for (int s = 0; s < sheets.Count && !stop; s++)
                 {
-                    var d = cache.Sheets[s]; dynamic ws = sheets[s]; string c1 = Letters(d.FirstCol), c2 = Letters(d.FirstCol + d.Cols - 1);
+                    var d = cache.Sheets[s]; dynamic ws = sheets[s]; string c1 = Letters(d.FirstCol), c2 = Letters(d.FirstCol + Math.Max(0, d.Cols - 1));
                     for (int r = 0; r < d.Rows; r += d.BlockRows)
                     {
-                        if (stop || cancelled()) { stop = true; break; }
+                        if (Machine.Commit() >= Machine.StopAt || stop || cancelled()) { stop = true; break; }
                         int n = Math.Min(d.BlockRows, d.Rows - r);
                         object[,] a = ReadBlock((object)ws, $"{c1}{d.FirstRow + r}:{c2}{d.FirstRow + r + n - 1}");
                         var off = new long[d.Cols + 1];
@@ -153,6 +178,9 @@ public static class CacheBuilder
                     cache.Names = ReadNames(xl);
                     Verify(xl, sheets, cache, sets, report);
                     res.VerifySec = sw.Elapsed.TotalSeconds;
+                    if (Machine.Commit() >= Machine.StopAt || cancelled()) { stop = true; }
+                    else afterRead?.Invoke((object)xl, (object)wb, cache);
+                    if (Machine.Commit() >= Machine.StopAt || cancelled()) stop = true;
                     w.Flush(); long at = fs.Position; cache.WriteDirectory(w); w.Write(at);
                 }
             }
@@ -166,20 +194,15 @@ public static class CacheBuilder
             res.UnreadRuns = cache.Sheets.Sum(d => (long)d.RunFmt.Sum(a => a.Count(x => x < 0)));
             return res;
         }
+        catch (OperationCanceledException)
+        { res.Code = Machine.Commit() >= Machine.StopAt ? 90 : 2; res.Stopped = res.Code == 90 ? "memory" : "cancelled"; return res; }
         catch (Exception e) when (e is COMException or InvalidCastException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or IOException)
-        {
-            res.Code = 1; res.Stopped = e.GetType().Name; // the type only
-            try { CachePolicy.Delete(part); } catch (IOException) { }
-            return res;
-        }
+        { res.Code = 1; res.Stopped = e.GetType().Name; return res; }
         finally
         {
-            try { if (wb != null) wb.Close(false); } catch (COMException) { }
-            wb = null;
-            try { xl.Quit(); } catch (COMException) { }
-            Marshal.FinalReleaseComObject(xl); xl = null;
-            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
-            Volatile.Write(ref sampling, false); // Excel is closed, never killed
+            Volatile.Write(ref sampling, false);
+            sampler.Join(1000);
+            try { CachePolicy.Delete(part); } catch (IOException) { }
         }
     }
 
@@ -199,6 +222,7 @@ public static class CacheBuilder
         {
             try
             {
+                if (Machine.Commit() >= Machine.StopAt) throw new OperationCanceledException();
                 object v = ws.Range[addr].Value2;
                 if (v is object[,] a) return a;
                 var one = (object[,])Array.CreateInstance(typeof(object), new[] { 1, 1 }, new[] { 1, 1 }); one[1, 1] = v; return one;
@@ -210,6 +234,8 @@ public static class CacheBuilder
     static void ReadRuns(object sheet, string col, int firstRow, int a, int b, List<(int start, int fmt)> runs, CacheData cache, Dictionary<string, int> ids, ref long calls, Stopwatch sw)
     {
         dynamic ws = sheet;
+        if (a > b) return;
+        if (Machine.Commit() >= Machine.StopAt) throw new OperationCanceledException();
         if (calls >= CallBudget || sw.Elapsed.TotalSeconds > FormatSecondsBudget) { Add(runs, a, -1); return; }
         calls++;
         object f = ws.Range[$"{col}{firstRow + a}:{col}{firstRow + b}"].NumberFormat;
@@ -262,6 +288,7 @@ public static class CacheBuilder
     {
         foreach (var (id, set) in sets)
         {
+            if (Machine.Commit() >= Machine.StopAt) throw new OperationCanceledException();
             var e = cache.Formats[id]; if (set.List.Count == 0) continue;
             var first = set.List[0]; string local = null;
             try { local = (string)sheets[first.Sheet].Cells[first.Row, first.Col].NumberFormatLocal; } catch (COMException) { }
