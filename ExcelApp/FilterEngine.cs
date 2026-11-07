@@ -13,6 +13,8 @@ public interface ICellSource
     int Cols { get; }
     /// <summary>Fills the arrays with one block of rows of one column. Arrays must hold at least <paramref name="count"/> items.</summary>
     void Read(int col, int fromRow, int count, string[] text, byte[] kind, double[] num);
+    // Sort needs raw numbers and text, not a formatted string for every number.
+    void ReadSort(int col, int fromRow, int count, string[] text, byte[] kind, double[] num) => Read(col, fromRow, count, text, kind, num);
 }
 
 /// <summary>One column's filter condition.</summary>
@@ -287,7 +289,7 @@ public sealed class FilterEngine
                 {
                     token.ThrowIfCancellationRequested();
                     int count = Math.Min(Block, _source.Rows - from);
-                    _source.Read(col, from, count, bt, bk, bn);
+                    _source.ReadSort(col, from, count, bt, bk, bn);
                     for (int i = 0; i < count; i++)
                     {
                         int local = from + i - header;
@@ -304,6 +306,27 @@ public sealed class FilterEngine
             kinds[k] = kind;
             nums[k] = num;
             texts[k] = text;
+        }
+
+        // Array.Sort's numeric key/value path avoids a managed callback for every comparison.
+        // Restore row order within equal-value runs to keep Excel's stable tie ordering.
+        if (keys == 1 && rows.TrueForAll(r => kinds[0][r - header] is KindNumber or KindEmpty))
+        {
+            var numericRows = rows.FindAll(r => kinds[0][r - header] == KindNumber).ToArray();
+            var values = new double[numericRows.Length];
+            for (int i = 0; i < values.Length; i++) values[i] = nums[0][numericRows[i] - header];
+            Array.Sort(values, numericRows);
+            if (_sort[0].Desc) { Array.Reverse(values); Array.Reverse(numericRows); }
+            for (int start = 0; start < values.Length;) {
+                token.ThrowIfCancellationRequested();
+                int end = start + 1;
+                while (end < values.Length && values[end].CompareTo(values[start]) == 0) end++;
+                if (end - start > 1) Array.Sort(numericRows, start, end - start);
+                start = end;
+            }
+            var emptyRows = rows.FindAll(r => kinds[0][r - header] == KindEmpty);
+            rows.Clear(); rows.AddRange(numericRows); rows.AddRange(emptyRows);
+            return;
         }
 
         var order = new int[n];

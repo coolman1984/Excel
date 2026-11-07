@@ -19,6 +19,12 @@ public static class SaveTests
         output = new StringWriter();
         string invalid = JsonSerializer.Serialize(new { source = @"D:\ExcelAppTest\syn-source.xlsx", target = @"D:\ExcelAppTest\syn-other.xlsx", sameFile = true });
         check("save rejects inconsistent target", SaveBack.Run(new StringReader(invalid), output) == 1 && !output.ToString().Contains("OPENING"), "");
+        output = new StringWriter();
+        invalid = JsonSerializer.Serialize(new { source = @"D:\ExcelAppTest\syn-source.csv", target = @"D:\ExcelAppTest\syn-source.csv", sameFile = true });
+        check("review: child refuses same-file CSV saves", SaveBack.Run(new StringReader(invalid), output) == 1 && !output.ToString().Contains("OPENING"), "");
+        output = new StringWriter();
+        invalid = JsonSerializer.Serialize(new { source = @"D:\ExcelAppTest\syn-missing.xlsx", target = @"D:\ExcelAppTest\syn-missing.xlsx", sameFile = true, expectedLength = 1, expectedTicks = 1 });
+        check("review: stale source refused before Excel starts", SaveBack.Run(new StringReader(invalid), output) == 7 && !output.ToString().Contains("OPENING"), "");
         if (offline) return;
         if (Machine.Commit() >= Machine.StopAt) { check("live save memory available", false, "memory"); return; }
         string root = @"D:\ExcelAppTest"; Directory.CreateDirectory(root);

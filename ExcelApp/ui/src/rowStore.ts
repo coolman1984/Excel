@@ -27,6 +27,7 @@ export function decodeCell(arr: any[]): CellData {
 export class RowStore {
     private blocks = new Map<number, WireRow[]>();
     private inflight = new Map<number, Promise<void>>();
+    private generation = 0;
     private sheet = 0;
     private viewRows = 0;
     /** Number of blocks requested since the last clear (test/inspection helper). */
@@ -51,9 +52,17 @@ export class RowStore {
 
     /** Drop every block (after filter, sort, undo, paste, opened, changed). */
     clear(): void {
+        this.generation++;
         this.blocks.clear();
         this.inflight.clear();
         this.requests = 0;
+    }
+
+    /** Discard affected blocks and reject responses from the previous edit generation. */
+    invalidateRows(rows: Iterable<number>): void {
+        this.generation++;
+        this.inflight.clear();
+        for (const row of rows) this.blocks.delete(Math.floor(row / BLOCK));
     }
 
     /** The decoded row for a view row, or undefined when not loaded. */
@@ -85,26 +94,23 @@ export class RowStore {
         if (this.inflight.has(b)) return; // coalesce: one request per block in flight
         const count = Math.min(BLOCK, this.viewRows - from);
         this.requests += 1;
-        const p = this.call("rows", { sheet: this.sheet, from, count })
-            .then((res: any) => {
-                const rows: WireRow[] = (res?.rows ?? []).map((r: any[]) => ({
-                    rowNumber: r[0],
-                    cells: (r[1] ?? []).map(decodeCell),
-                }));
-                if (this.blocks.get(b)?.length === rows.length) {
-                    // already filled by a later request; keep it
-                }
-                this.blocks.set(b, rows);
-                this.touch(b);
-                this.evict();
-                this.onBlock(from, rows.length);
-            })
-            .catch(() => {
-                /* a failed block just stays Loading; the host reports its own error */
-            })
-            .finally(() => {
-                this.inflight.delete(b);
-            });
+        const generation = this.generation;
+        const p = (async () => {
+            const rows: WireRow[] = [];
+            while (rows.length < count) {
+                const res = await this.call("rows", { sheet: this.sheet, from: from + rows.length, count: count - rows.length });
+                if (generation !== this.generation) return;
+                const batch = res?.rows ?? [];
+                if (batch.length === 0) throw new Error("The host returned no rows.");
+                rows.push(...batch.map((r: any[]) => ({ rowNumber: r[0], cells: (r[1] ?? []).map(decodeCell) })));
+            }
+            this.blocks.set(b, rows);
+            this.touch(b); this.evict(); this.onBlock(from, rows.length);
+        })().catch(() => {
+            // The next visible-region request may retry a failed block.
+        }).finally(() => {
+            if (this.inflight.get(b) === p) this.inflight.delete(b);
+        });
         this.inflight.set(b, p);
     }
 

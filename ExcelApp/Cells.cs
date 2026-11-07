@@ -182,6 +182,12 @@ public sealed class SheetSource : ICellSource, IDisposable
     public int Rows => d.Rows; public int Cols => d.Cols;
 
     public void Read(int col, int fromRow, int count, string[] text, byte[] kind, double[] num)
+        => ReadCore(col, fromRow, count, text, kind, num, false);
+
+    public void ReadSort(int col, int fromRow, int count, string[] text, byte[] kind, double[] num)
+        => ReadCore(col, fromRow, count, text, kind, num, true);
+
+    void ReadCore(int col, int fromRow, int count, string[] text, byte[] kind, double[] num, bool raw)
     {
         ThreadLocal<SheetReader> tl; lock (gate) tl = readers;
         var rd = tl.Value!; int done = 0;
@@ -194,15 +200,15 @@ public sealed class SheetSource : ICellSource, IDisposable
             {
                 int i = i0 + k; byte kd = c.KindAt(i); int o = done + k;
                 if (kd == CellKind.Empty) { text[o] = ""; kind[o] = 0; num[o] = 0; continue; }
-                var v = rd.Show(c, i, row + k, col);
-                text[o] = v.Text; kind[o] = kd; num[o] = kd == CellKind.Text ? 0 : c.Nums[i];
-                if (kd == CellKind.Text && v.Text.Length == 0) kind[o] = 0;
+                text[o] = raw ? (kd == CellKind.Text ? c.TextAt(i) : "") : rd.Show(c, i, row + k, col).Text;
+                kind[o] = kd; num[o] = kd == CellKind.Text ? 0 : c.Nums[i];
+                if (kd == CellKind.Text && text[o].Length == 0) kind[o] = 0;
             }
             done += n;
         }
         if (cells.HasEdits)
             for (int k = 0; k < count; k++)
-                if (cells.TryEdit(sheet, fromRow + k, col, out var e) && !EditMarks.IsStyleOnly(e))
+                if (cells.TryEdit(sheet, fromRow + k, col, out var e))
                 {
                     var s = cells.Render(sheet, rd, fromRow + k, col);
                     text[k] = s.Text; kind[k] = s.Kind; num[k] = s.Num;

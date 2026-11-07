@@ -76,6 +76,7 @@ public sealed class MainForm : Form
 
     async Task Init()
     {
+        var initTimer = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExcelApp", "WebView2");
@@ -83,7 +84,9 @@ public sealed class MainForm : Form
             try { env = await CoreWebView2Environment.CreateAsync(null, data); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
             { Log.Write("webview data folder fallback"); env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Path.GetTempPath(), "ExcelAppWebView2")); }
+            if (Unattended) Console.WriteLine($"START environment {initTimer.ElapsedMilliseconds} ms");
             await View.EnsureCoreWebView2Async(env);
+            if (Unattended) Console.WriteLine($"START webview {initTimer.ElapsedMilliseconds} ms");
         }
         catch (Exception e)
         {
@@ -96,7 +99,12 @@ public sealed class MainForm : Form
         st.AreDefaultContextMenusEnabled = false; st.AreBrowserAcceleratorKeysEnabled = false; st.IsZoomControlEnabled = false;
         st.IsStatusBarEnabled = false; st.IsSwipeNavigationEnabled = false; st.AreDevToolsEnabled = devUrl != null;
         w.NewWindowRequested += (s, e) => e.Handled = true;
-        w.WebMessageReceived += (s, e) => { try { _ = Bridge.HandleMessage(e.WebMessageAsJson is { Length: > 0 } j && j.StartsWith('"') ? JsonSerializer.Deserialize<string>(j)! : e.WebMessageAsJson); } catch (Exception ex) { Log.Write("message " + ex.GetType().Name); } };
+        bool Trusted(string source) => Uri.TryCreate(source, UriKind.Absolute, out var u) &&
+            (devUrl == null ? u.Scheme == "https" && u.Host == "app.excel" : new Uri(devUrl).GetLeftPart(UriPartial.Authority) == u.GetLeftPart(UriPartial.Authority));
+        w.NavigationStarting += (s, e) => { if (!Trusted(e.Uri)) e.Cancel = true; };
+        w.PermissionRequested += (s, e) => e.State = CoreWebView2PermissionState.Deny;
+        w.DownloadStarting += (s, e) => e.Cancel = true;
+        w.WebMessageReceived += (s, e) => { try { if (!Trusted(e.Source)) return; _ = Bridge.HandleMessage(e.WebMessageAsJson is { Length: > 0 } j && j.StartsWith('"') ? JsonSerializer.Deserialize<string>(j)! : e.WebMessageAsJson); } catch (Exception ex) { Log.Write("message " + ex.GetType().Name); } };
         if (devUrl != null) w.Navigate(devUrl);
         else
         {
@@ -104,7 +112,7 @@ public sealed class MainForm : Form
             w.SetVirtualHostNameToFolderMapping("app.excel", uiFolder, CoreWebView2HostResourceAccessKind.Allow);
             w.Navigate("https://app.excel/index.html");
         }
-        w.NavigationCompleted += (s, e) => ready.TrySetResult(e.IsSuccess);
+        w.NavigationCompleted += (s, e) => { if (Unattended) Console.WriteLine($"START navigation {initTimer.ElapsedMilliseconds} ms"); ready.TrySetResult(e.IsSuccess); };
         // The file named on the command line opens once the interface has asked for "ready", so no event is missed.
         Session.UiReady = () => { var p = OpenOnStart; OpenOnStart = null; if (p != null) try { Session.Open(p); } catch (UserError) { } };
     }
@@ -114,8 +122,9 @@ public sealed class MainForm : Form
     // ---- closing ------------------------------------------------------------------------------
     void OnClosing(object? s, FormClosingEventArgs e)
     {
+        if (Session.ChildTimedOut) { Session.CancelBuildForClose(); return; }
         if (allowClose || Unattended) { Session.CancelBuildForClose(); return; }
-        if (Session.Saving) { e.Cancel = true; closeAfterSave = true; Bridge.Post?.Invoke("{\"event\":\"closing\",\"phase\":\"Finishing the save...\"}"); WaitSaveThenClose(); return; }
+        if (Session.Saving) { e.Cancel = true; if (!closeAfterSave) { closeAfterSave = true; Bridge.Post?.Invoke("{\"event\":\"closing\",\"phase\":\"Finishing the save...\"}"); WaitSaveThenClose(); } return; }
         if (Session.Dirty) { e.Cancel = true; if (!closeAsked) { closeAsked = true; Bridge.Post?.Invoke(JsonSerializer.Serialize(new { @event = "closeRequested", fileName = Session.FileName })); } return; }
         Session.CancelBuildForClose();
     }

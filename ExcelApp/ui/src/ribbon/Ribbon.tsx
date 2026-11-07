@@ -261,10 +261,10 @@ function HomeTab(p: RibbonProps): React.ReactElement {
                         <RButton label="Right" icon="alignRight" title="Align right" disabled={d} onClick={() => p.onAlign(1)} />
                     </div>
                     <div className="rrow">
-                        <RButton label="Top" disabled={d} onClick={p.onWrap} />
-                        <RButton label="Middle" disabled={d} onClick={p.onWrap} />
-                        <RButton label="Bottom" disabled={d} onClick={p.onWrap} />
-                        <RButton label="Wrap" title="Wrap text" disabled={d} onClick={p.onWrap} />
+                        <RButton label="Top" disabled title="Vertical alignment - coming later" onClick={p.onWrap} />
+                        <RButton label="Middle" disabled title="Vertical alignment - coming later" onClick={p.onWrap} />
+                        <RButton label="Bottom" disabled title="Vertical alignment - coming later" onClick={p.onWrap} />
+                        <RButton label="Wrap" title="Wrap text - coming later" disabled onClick={p.onWrap} />
                     </div>
                 </div>
             </Group>

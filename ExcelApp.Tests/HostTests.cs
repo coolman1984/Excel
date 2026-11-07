@@ -80,6 +80,9 @@ public static class HostTests
             var inverse = Session.SplitClipboard(CopyText.Build(new[] { (0, 0), (0, 1) }, (r, k) => k == 0 ? "p\tq" : "z"));
             check("split: the inverse of the copy text", inverse.Count == 1 && inverse[0][0] == "p\tq" && inverse[0][1] == "z", "");
             check("split: empty text gives no rows", Session.SplitClipboard("").Count == 0, "");
+            bool capped = false;
+            try { Session.SplitClipboard(new string('\t', Session.MaxCells)); } catch (UserError) { capped = true; }
+            check("review: clipboard parser stops at its cell cap", capped, "");
         });
         Try("style json", () =>
         {
@@ -96,6 +99,9 @@ public static class HostTests
             check("bridge: broken JSON gives a plain error", !bad.RootElement.GetProperty("ok").GetBoolean(), "");
             check("bridge: error text carries no exception message", !bad.RootElement.GetProperty("error").GetString()!.Contains("Unexpected"), "");
             Call(b, "log", new { text = new string('x', 300) });
+            var sentinel = "syn-log-" + Guid.NewGuid().ToString("N");
+            Call(b, "log", new { text = sentinel }); Call(b, sentinel, null, false);
+            check("review: arbitrary UI text and unknown commands do not reach the log", !File.ReadAllText(Log.FilePath).Contains(sentinel), "");
             check("bridge: ready reports the version", Call(b, "ready").GetProperty("version").GetString() == Session.Version, "");
             bool got = false; s.CloseAnswer = a => got = a == "dontsave"; Call(b, "closeAnswer", new { action = "dontsave" });
             check("bridge: closeAnswer reaches the window", got, "");
@@ -105,6 +111,7 @@ public static class HostTests
             var o = new StringWriter(); int code = SaveBack.Run(new StringReader("{}"), o, 0);
             check("save: a stop at 0% refuses before starting Excel", code == 90 && o.ToString().Contains("STOPPED memory"), $"code={code}");
         });
+        Try("review build memory stop", () => check("review: build refuses at memory stop before starting Excel", WorkbookReader.Build(@"D:\ExcelAppTest\syn-missing.xlsx", _ => { }, () => false, 0).Code == 90, ""));
         Try("policy scan", Policy);
     }
 
@@ -149,7 +156,7 @@ public static class HostTests
     }
 
     // ---- live tests (hidden Excel, made-up data) ---------------------------------------------
-    static void MakeWorkbook(string path)
+    static void MakeWorkbook(string path, bool password = false)
     {
         dynamic xl = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application")!)!; dynamic wb = null!;
         try
@@ -167,7 +174,7 @@ public static class HostTests
             s1.Range["D22"].Formula = "=1/0";
             s2.Range["A1"].Value2 = "x"; s2.Range["A2"].Value2 = 5.0;
             if (File.Exists(path)) File.Delete(path);
-            wb.SaveAs(path, 51);
+            if (password) wb.SaveAs(path, 51, Password: "syn-password"); else wb.SaveAs(path, 51);
         }
         finally
         {
@@ -191,6 +198,15 @@ public static class HostTests
         string file = Path.Combine(Dir, "syn-host.xlsx"), saved = Path.Combine(Dir, "syn-host-saved.xlsx");
         if (!CachePolicy.ThisPcApproved) { check("live: this PC is approved for the fast copy", false, ""); return; }
         MakeWorkbook(file);
+        Try("review password refusal", () => {
+            string encrypted = Path.Combine(Dir, "syn-password.xlsx");
+            MakeWorkbook(encrypted, true);
+            try {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                var result = WorkbookReader.Build(encrypted, _ => { }, () => false);
+                check("review: password workbook refused without a prompt", result.Code == 1 && timer.Elapsed.TotalSeconds < 30, "");
+            } finally { if (File.Exists(encrypted)) File.Delete(encrypted); }
+        });
         CachePolicy.Delete(CachePolicy.PathFor(file)); CachePolicy.Delete(CachePolicy.PathFor(saved));
         if (File.Exists(saved)) File.Delete(saved);
         using var s = new Session(Path.Combine(Path.GetTempPath(), "ExcelAppTestData")) { ChildExe = FindChildExe() };
@@ -344,6 +360,34 @@ public static class HostTests
             var e4 = Call(b, "edge", new { sheet = 0, row = 10, col = 3, direction = "up" });
             check("edge: up from an empty cell reaches the header", e4.GetProperty("row").GetInt32() == 0, e4.GetProperty("row").ToString());
         });
+        Try("review regressions", () =>
+        {
+            Call(b, "setCell", new { sheet = 0, row = 2, col = 1, input = "overlay-needle" });
+            lock (events) events.Clear();
+            Call(b, "find", new { sheet = 0, query = "overlay-needle" });
+            check("review: find sees text typed over a numeric cache cell", Event("findDone", 30).GetProperty("total").GetInt32() == 1, "");
+            Call(b, "undo");
+            Call(b, "setCell", new { sheet = 0, row = 4, col = 0, input = "gone" });
+            lock (events) events.Clear(); Call(b, "find", new { sheet = 0, query = "needle-unique" });
+            check("review: find excludes a cached hit overwritten by an edit", Event("findDone", 30).GetProperty("total").GetInt32() == 0, "");
+            Call(b, "undo");
+            Call(b, "setStyle", new { sheet = 0, ranges = new[] { new[] { 1, 1, 1, 1 } }, style = new { numberFormat = "0.00%" } });
+            var fv = Call(b, "filterValues", new { sheet = 0, col = 1 });
+            check("review: filters use edited number formats", fv.GetProperty("values").EnumerateArray().Any(v => v.GetProperty("text").GetString() == "100.00%"), "");
+            Call(b, "undo");
+            check("review: locate rejects rows beyond the sheet", Call(b, "locate", new { sheet = 0, row = 999 }).GetProperty("view").GetInt32() == -1, "");
+            clipText = "bad";
+            check("review: paste refuses negative coordinates", Call(b, "paste", new { sheet = 0, row = -1, col = 0 }, false).GetString()!.Contains("outside"), "");
+            clipText = "item-1";
+            Call(b, "cut", new { sheet = 0, ranges = new[] { new[] { 1, 0, 1, 0 } } });
+            check("review: cut paste outside sheet refuses without deleting source", Call(b, "paste", new { sheet = 0, row = 999, col = 0 }, false).GetString()!.Contains("outside") && Text(b, 0, 1, 0) == "item-1", "");
+            Call(b, "copy", new { sheet = 0, ranges = new[] { new[] { 1, 0, 1, 0 } } });
+            var timestamp = File.GetLastWriteTimeUtc(file);
+            File.SetLastWriteTimeUtc(file, timestamp.AddMinutes(1));
+            s.PickSavePath = _ => file;
+            check("review: Save As to the source refuses when source changed", Call(b, "save", new { saveAs = true }, false).GetString()!.Contains("changed on disk"), "");
+            File.SetLastWriteTimeUtc(file, timestamp);
+        });
         Try("width and freeze", () =>
         {
             Call(b, "setColWidth", new { sheet = 0, col = 0, px = 120 }); Call(b, "setFreeze", new { sheet = 0, rows = 1, cols = 1 });
@@ -366,7 +410,7 @@ public static class HostTests
             check("save: the saved file is NASCA protected", File.ReadAllBytes(saved).Take(8).SequenceEqual(Encoding.ASCII.GetBytes("<## NASC")), "NASCA mark: no");
             check("save: the copy is fresh for the saved file", CacheData.HeaderMatches(CachePolicy.PathFor(saved), saved), "");
             check("save: the session now points at the saved file", s.SourcePath == saved && Call(b, "info").GetProperty("nasca").GetBoolean(), "");
-            check("save: no .part file left", !Directory.GetFiles(CachePolicy.Folder, "*.part").Any(p => new FileInfo(p).LastWriteTime > DateTime.Now.AddMinutes(-5)), "");
+            check("save: no .part file left", !File.Exists(CachePolicy.PathFor(saved) + ".part") && !File.Exists(CachePolicy.SidecarPathFor(saved) + ".part"), "");
             Call(b, "save", new { saveAs = false }); // nothing to do is fine; a second save of the same file works
             Call(b, "setCell", new { sheet = 0, row = 1, col = 1, input = "26" });
         });
@@ -386,7 +430,7 @@ public static class HostTests
                 bool Flag(string name, int want) { using var ms = data.GetData(name) as MemoryStream; if (ms == null) return false; var bytes = ms.ToArray(); return bytes.Length >= 4 && BitConverter.ToInt32(bytes, 0) == want; }
                 ok = Clipboard.GetText() == made && Flag("ExcludeClipboardContentFromMonitorProcessing", 1) && Flag("CanIncludeInClipboardHistory", 0) && Flag("CanUploadToCloudClipboard", 0);
                 detail = ok ? "" : "flags missing";
-                if (before != null) Clipboard.SetText(before); else Clipboard.Clear();
+                if (before != null) ExcelApp.MainForm.ClipboardSink(before); else Clipboard.Clear();
             }
             catch (Exception e) { detail = e.GetType().Name; }
         });

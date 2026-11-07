@@ -15,6 +15,8 @@ public static class SaveBack
         public string Source { get; set; } = "";
         public string Target { get; set; } = "";
         public bool SameFile { get; set; }
+        public long? ExpectedLength { get; set; }
+        public long? ExpectedTicks { get; set; }
         public List<Edit> Edits { get; set; } = new();
         public List<Width> ColWidths { get; set; } = new();
         public List<Freeze> Freeze { get; set; } = new();
@@ -56,6 +58,12 @@ public static class SaveBack
             options.Converters.Add(new JsonStringEnumConverter());
             var job = JsonSerializer.Deserialize<Job>(line, options) ?? throw new InvalidDataException();
             Validate(job);
+            void Fresh() {
+                if (!job.SameFile || job.ExpectedLength == null || job.ExpectedTicks == null) return;
+                var source = new FileInfo(job.Source);
+                if (!source.Exists || source.Length != job.ExpectedLength || source.LastWriteTimeUtc.Ticks != job.ExpectedTicks) throw new SaveStop(7, "changed");
+            }
+            Fresh();
             if (!ReferenceEquals(stdin, Console.In)) { /* In-memory callers need no pipe watcher. */ }
             else _ = Task.Run(() => { try { while (stdin.Read() >= 0) { } } catch (IOException) { } Volatile.Write(ref cancelled, true); });
             Check(); Line("OPENING");
@@ -112,7 +120,7 @@ public static class SaveBack
             }
             Check(); if ((int)xl.Calculation == -4135) xl.CalculateFull();
             Line("SAVING");
-            if (job.SameFile) wb.Save();
+            if (job.SameFile) { Fresh(); wb.Save(); }
             else wb.SaveAs(job.Target, FileFormat: Format(job.Target), ConflictResolution: 2);
             Line("SAVED"); Check();
             var result = CacheBuilder.BuildFromOpenWorkbook((object)xl, (object)wb, job.Target, CachePolicy.PathFor(job.Target), Line,
@@ -140,7 +148,7 @@ public static class SaveBack
         if (string.IsNullOrWhiteSpace(j.Source) || string.IsNullOrWhiteSpace(j.Target)) throw new InvalidDataException();
         bool same = string.Equals(Path.GetFullPath(j.Source), Path.GetFullPath(j.Target), StringComparison.OrdinalIgnoreCase);
         if (same != j.SameFile) throw new InvalidDataException();
-        if (!j.SameFile) _ = Format(j.Target);
+        _ = Format(j.Target);
         if (j.Edits.Any(e => e.Row < 1 || e.Row > 1048576 || e.Col < 1 || e.Col > 16384 || !Enum.IsDefined(e.Kind) || e.Kind == EditKind.Number && !double.IsFinite(e.Num))) throw new InvalidDataException();
         if (j.ColWidths.Any(e => e.Col < 1 || e.Col > 16384 || !double.IsFinite(e.Px) || e.Px < 5 || e.Px > 1790)) throw new InvalidDataException();
         if (j.Freeze.Any(e => e.Rows < 0 || e.Rows >= 1048576 || e.Cols < 0 || e.Cols >= 16384)) throw new InvalidDataException();

@@ -41,9 +41,10 @@ public sealed class Session : IDisposable
     volatile bool opening, saving; volatile bool saveOpened; Child? child;
     (int Sheet, List<(int, int)> Cells, string Hash)? pendingCut;
     FileSystemWatcher? watcher; bool changedSent; System.Threading.Timer? memTimer;
-    public bool Dirty => Edits.Dirty;
+    public bool Dirty { get { lock (editLock) return Edits.Dirty; } }
     public bool Busy => opening || saving;
     public bool Saving => saving;
+    public bool ChildTimedOut => child?.TimedOut ?? false;
     public string? SourcePath => path;
     public CacheData? Cache => cache;
     public string FileName => path == null ? "" : System.IO.Path.GetFileName(path);
@@ -65,7 +66,7 @@ public sealed class Session : IDisposable
         void S(string name, Func<JsonElement, object?> f) => h[name] = a => Task.FromResult(f(a));
         S("ready", _ => { UiReady?.Invoke(); return new { version = Version, recent = Recent(), approved = CachePolicy.ThisPcApproved }; });
         S("pickFile", _ => new { path = PickOpenPath() });
-        S("open", a => { Open(Arg.Str(a, "path") ?? throw new UserError("No file was chosen.")); return new { started = true }; });
+        S("open", a => { Open(Arg.Str(a, "path") ?? throw new UserError("No file was chosen."), Arg.Bool(a, "discard")); return new { started = true }; });
         S("cancelOpen", _ => { child?.CloseInput(); return new { }; });
         S("workbook", _ => WorkbookInfo());
         S("sheet", a => SelectSheet(Arg.Int(a, "sheet")));
@@ -81,11 +82,11 @@ public sealed class Session : IDisposable
         S("setFreeze", a => { lock (editLock) Edits.SetFreeze(Arg.Int(a, "sheet"), Math.Clamp(Arg.Int(a, "rows"), 0, 10), Math.Max(0, Arg.Int(a, "cols"))); Dirtied(); return new { dirty = true }; });
         h["save"] = async a => await SaveAsync(Arg.Bool(a, "saveAs"));
         S("cancelSave", _ => { if (saving && !saveOpened) child?.CloseInput(); else if (saving) throw new UserError("It is too late to cancel. Excel is already working on the file."); return new { }; });
-        S("close", _ => { CloseWorkbook(); return new { }; });
+        S("close", a => { if (Dirty && !Arg.Bool(a, "discard")) throw new UserError("Save or discard your changes before closing."); CloseWorkbook(); return new { }; });
         S("closeAnswer", a => { CloseAnswer?.Invoke(Arg.Str(a, "action") ?? "cancel"); return new { }; });
         S("recent", _ => new { recent = Recent() });
         S("openExternal", _ => { if (path != null) Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", path }, UseShellExecute = false, CreateNoWindow = true }); return new { }; });
-        S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (t.Length <= 200) Log.Write("ui " + t); return new { }; });
+        S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
     }
 
@@ -109,9 +110,10 @@ public sealed class Session : IDisposable
     // =====================================================================================
     // Opening
     // =====================================================================================
-    public void Open(string file)
+    public void Open(string file, bool discard = false)
     {
         if (Busy) throw new UserError("Please wait until the current work is finished.");
+        if (Dirty && !discard) throw new UserError("Save or discard your changes before opening another file.");
         if (!File.Exists(file)) throw new UserError("That file was not found.");
         if (!OpenExt.Contains(System.IO.Path.GetExtension(file).ToLowerInvariant())) throw new UserError("This kind of file cannot be opened. Choose an Excel file.");
         opening = true;
@@ -149,6 +151,7 @@ public sealed class Session : IDisposable
             LoadCache(file, cp, -1);
             AddRecent(file);
             Log.Write($"opened sheets={cache!.Sheets.Count} cells={cache.Sheets.Sum(s => s.Cells)} {sw.ElapsedMilliseconds} ms");
+            opening = false;
             Emit("opened", new { Workbook = WorkbookInfo() });
         }
         catch (InvalidDataException) { OpenFailed("The fast copy could not be read."); }
@@ -162,6 +165,7 @@ public sealed class Session : IDisposable
     sealed class Child
     {
         public Process P = null!; public TaskCompletionSource<int> Done = new();
+        public volatile bool TimedOut;
         public void CloseInput() { try { P.StandardInput.Close(); } catch (Exception e) when (e is IOException or InvalidOperationException) { } }
     }
 
@@ -176,22 +180,34 @@ public sealed class Session : IDisposable
         return c;
     }
 
+    async Task<int> WaitChild(Child running, bool save)
+    {
+        if (await Task.WhenAny(running.Done.Task, Task.Delay(TimeSpan.FromMinutes(5))) != running.Done.Task) {
+            running.TimedOut = true;
+            const string message = "Excel is taking longer than expected. You can close this window. Its own Excel will be left to finish safely.";
+            Emit(save ? "saving" : "opening", new { Phase = message, Percent = 0, CanCancel = false });
+            Log.Write("child exceeded time limit");
+        }
+        return await running.Done.Task;
+    }
+
     int RunBuild(string file, Stopwatch sw)
     {
         var c = StartChild("--build", file, line =>
         {
             double secs = sw.Elapsed.TotalSeconds;
-            if (line == "OPENING") Emit("opening", new { Phase = "Starting Excel", Percent = 0, Seconds = secs });
+            if (line == "OPENING") Emit("opening", new { Phase = "Starting Excel", Percent = 0, CanCancel = true, Seconds = secs });
             else if (line is "OPENED" or "FORMATS") Emit("opening", new { Phase = "Reading number formats", Percent = 0, Seconds = secs });
             else if (line.StartsWith("READ ") && int.TryParse(line.AsSpan(5), out int p)) Emit("opening", new { Phase = "Making the fast copy", Percent = p, Seconds = secs });
             else if (line == "CHECKING") Emit("opening", new { Phase = "Checking numbers against Excel", Percent = 100, Seconds = secs });
         });
         child = c;
-        try { return c.Done.Task.GetAwaiter().GetResult(); } finally { child = null; }
+        try { return WaitChild(c, false).GetAwaiter().GetResult(); } finally { child = null; }
     }
 
     void LoadCache(string file, string cachePath, int keepSheet)
     {
+        findCts?.Cancel();
         var data = CacheData.Load(cachePath);
         ReleaseReaders(); DisposeSheets();
         lock (editLock) Edits.Clear();
@@ -232,6 +248,7 @@ public sealed class Session : IDisposable
     void CloseWorkbook()
     {
         if (Busy) throw new UserError("Please wait until the current work is finished.");
+        findCts?.Cancel();
         ReleaseReaders(); DisposeSheets(); watcher?.Dispose(); watcher = null;
         cache = null; path = null; cells = null; sidecar = null; lock (editLock) Edits.Clear();
         TitleChanged?.Invoke("", false);
@@ -252,6 +269,7 @@ public sealed class Session : IDisposable
     int ToView(int sheet, int real)
     {
         var s = sheets[sheet];
+        if (real < 0 || real >= cache!.Sheets[sheet].Rows) return -1;
         if (s.Map == null) return real;
         if (s.Inverse == null) { var inv = new int[cache!.Sheets[sheet].Rows]; Array.Fill(inv, -1); for (int i = 0; i < s.Map.Length; i++) inv[s.Map[i]] = i; s.Inverse = inv; }
         return real >= 0 && real < s.Inverse.Length ? s.Inverse[real] : -1;
@@ -497,7 +515,11 @@ public sealed class Session : IDisposable
     /// <summary>Splits clipboard text on tabs and line breaks; a quoted cell may hold both. The inverse of CopyText's quoting.</summary>
     public static List<List<string>> SplitClipboard(string text)
     {
-        var rows = new List<List<string>>(); var row = new List<string>(); var sb = new StringBuilder(); int i = 0; bool any = false;
+        var rows = new List<List<string>>(); var row = new List<string>(); var sb = new StringBuilder(); int i = 0, cells = 0; bool any = false;
+        void AddCell() {
+            if (++cells > MaxCells) throw new UserError($"Too much to paste. The limit is {MaxCells:N0} cells.");
+            row.Add(sb.ToString()); sb.Clear();
+        }
         while (i < text.Length)
         {
             char ch = text[i];
@@ -507,11 +529,11 @@ public sealed class Session : IDisposable
                 while (i < text.Length) { if (text[i] == '"') { if (i + 1 < text.Length && text[i + 1] == '"') { sb.Append('"'); i += 2; continue; } i++; break; } sb.Append(text[i++]); }
                 any = true; continue;
             }
-            if (ch == '\t') { row.Add(sb.ToString()); sb.Clear(); any = true; i++; }
-            else if (ch == '\r' || ch == '\n') { row.Add(sb.ToString()); sb.Clear(); rows.Add(row); row = new(); any = false; i += ch == '\r' && i + 1 < text.Length && text[i + 1] == '\n' ? 2 : 1; }
+            if (ch == '\t') { AddCell(); any = true; i++; }
+            else if (ch == '\r' || ch == '\n') { AddCell(); rows.Add(row); row = new(); any = false; i += ch == '\r' && i + 1 < text.Length && text[i + 1] == '\n' ? 2 : 1; }
             else { sb.Append(ch); any = true; i++; }
         }
-        if (any || sb.Length > 0 || row.Count > 0) { row.Add(sb.ToString()); rows.Add(row); }
+        if (any || sb.Length > 0 || row.Count > 0) { AddCell(); rows.Add(row); }
         return rows;
     }
 
@@ -519,6 +541,7 @@ public sealed class Session : IDisposable
     {
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
         int row0 = Arg.Int(a, "row"), col0 = Arg.Int(a, "col");
+        CheckCell(c, st, sheet, row0, col0);
         string text = ClipboardGet() ?? "";
         if (text.Length == 0) throw new UserError("The clipboard has no text to paste.");
         var grid = SplitClipboard(text); long n = grid.Sum(r => (long)r.Count);
@@ -531,6 +554,8 @@ public sealed class Session : IDisposable
                 int real = Real(st, vr); seen.Add((real, col));
                 list.Add((real, col, Typed(sheet, real, col, grid[i][k])));
             }
+        if (pendingCut is { } otherCut && otherCut.Sheet != sheet && otherCut.Hash == Hash(text))
+            throw new UserError("Cut cells can only be moved within the same sheet. Use Copy to paste on another sheet.");
         if (pendingCut is { } cut && cut.Sheet == sheet && cut.Hash == Hash(text))
             foreach (var (r, k) in cut.Cells) if (!seen.Contains((r, k))) list.Add((r, k, cells!.TryEdit(sheet, r, k, out var old) && old.Style != null ? new CellEdit(EditKind.Clear, Style: old.Style) : new CellEdit(EditKind.Clear)));
         pendingCut = null;
@@ -640,21 +665,30 @@ public sealed class Session : IDisposable
         var c = Need(); int sheet = Arg.Int(a, "sheet", -1); string query = Arg.Str(a, "query") ?? ""; bool matchCase = Arg.Bool(a, "matchCase");
         findCts?.Cancel(); var cts = findCts = new CancellationTokenSource();
         var which = sheet < 0 ? Enumerable.Range(0, c.Sheets.Count).ToList() : new List<int> { St(sheet) is { } && true ? sheet : 0 };
-        var cacheNow = c;
+        var cacheNow = c; var cellsNow = cells!;
+        var overlay = Snapshot();
         Task.Run(() =>
         {
-            var batch = new List<object[]>(); int total = 0; var rds = new Dictionary<int, SheetReader>(); bool completed = true;
+            var batch = new List<object[]>(); int total = 0; var found = new HashSet<(int, int, int)>(); var rds = new Dictionary<int, SheetReader>(); bool completed = true;
             void Flush() { if (batch.Count == 0) return; var b = batch; batch = new(); Emit("findHits", new { Hits = b }); }
             try
             {
-                completed = SearchEngine.Run(cacheNow, which, query, h =>
-                {
-                    if (!rds.TryGetValue(h.Sheet, out var rd)) rds[h.Sheet] = rd = new SheetReader(cacheNow, cacheNow.Sheets[h.Sheet]);
-                    string text = cells!.Render(h.Sheet, rd, h.Row, h.Col).Text;
-                    if (matchCase && !text.Contains(query, StringComparison.Ordinal)) return;
-                    total++; batch.Add(new object[] { h.Sheet, h.Row, h.Col, text });
+                void Hit(int sheetIndex, int row, int col) {
+                    if (total >= SearchEngine.MaxHits) { completed = false; return; }
+                    if (!rds.TryGetValue(sheetIndex, out var rd)) rds[sheetIndex] = rd = new SheetReader(cacheNow, cacheNow.Sheets[sheetIndex]);
+                    string text = cellsNow.Render(sheetIndex, rd, row, col).Text;
+                    if (!text.Contains(query, matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase) || !found.Add((sheetIndex, row, col))) return;
+                    total++; batch.Add(new object[] { sheetIndex, row, col, text });
                     if (batch.Count >= 200) Flush();
-                }, p => Emit("findProgress", new { Percent = p }), cts.Token);
+                }
+                bool cacheComplete = SearchEngine.Run(cacheNow, which, query, h => Hit(h.Sheet, h.Row, h.Col),
+                    p => Emit("findProgress", new { Percent = p }), cts.Token);
+                completed &= cacheComplete;
+                foreach (var (key, edit) in overlay) {
+                    cts.Token.ThrowIfCancellationRequested();
+                    if (which.Contains(key.Sheet)) Hit(key.Sheet, key.Row, key.Col);
+                }
+
             }
             catch (OperationCanceledException) { return; }
             finally { foreach (var r in rds.Values) r.Dispose(); }
@@ -676,7 +710,8 @@ public sealed class Session : IDisposable
             if (edited) t = e!.Kind == EditKind.Text ? e.Text : null; else t = rd.RawText(real, col);
             if (string.IsNullOrEmpty(t) || !t.Contains(query, cmp)) return;
             var fresh = (edited ? e! : new CellEdit(EditKind.Text)) with { Kind = EditKind.Text, Text = t.Replace(query, repl, cmp) };
-            list.Add((real, col, fresh)); count++;
+            list.Add((real, col, KeepStyle(sheet, real, col, fresh))); count++;
+            if (list.Count > MaxCells) throw new UserError($"Too many cells would change. The limit is {MaxCells:N0}.");
         }
         lock (readerLock)
         {
@@ -684,7 +719,9 @@ public sealed class Session : IDisposable
             if (!all)
             {
                 if (!a.TryGetProperty("at", out var at) || at.GetArrayLength() < 2) throw new UserError("Choose a cell first.");
-                Try(rd, at[0].GetInt32(), at[1].GetInt32());
+                int rr = at[0].GetInt32(), cc = at[1].GetInt32();
+                if (rr < 0 || rr >= d.Rows || cc < 0 || cc >= d.Cols) throw new UserError("That cell is outside the sheet.");
+                Try(rd, rr, cc);
             }
             else
             {
@@ -819,15 +856,16 @@ public sealed class Session : IDisposable
         double commit = Machine.Commit();
         if (commit >= Machine.StopAt) throw new UserError($"Windows memory is at {commit:F0}%. Saving now could hang the PC. Close some programs and try again.");
         bool same = string.Equals(System.IO.Path.GetFullPath(source), target, StringComparison.OrdinalIgnoreCase);
+        if (same && !c.IsFreshFor(source)) throw new UserError("The file changed on disk since you opened it. Use Save As, or read the file again and redo your changes.");
         string job = BuildJob(c, source, target, same);
         int keepSheet = current; var sw = Stopwatch.StartNew(); bool sawSaved = false; int seenCode = -1;
         saving = true; saveOpened = false; gate.Reset(); ReleaseReaders(); watcher?.Dispose(); watcher = null;
         try
         {
-            Emit("saving", new { Phase = "Starting Excel", Percent = 0 });
+            Emit("saving", new { Phase = "Starting Excel", Percent = 0, CanCancel = true });
             var ch = StartChild("--save", null, line =>
             {
-                if (line == "OPENING") Emit("saving", new { Phase = "Starting Excel", Percent = 0 });
+                if (line == "OPENING") Emit("saving", new { Phase = "Starting Excel", Percent = 0, CanCancel = true });
                 else if (line == "OPENED") { saveOpened = true; Emit("saving", new { Phase = "Writing changes", Percent = 0 }); }
                 else if (line.StartsWith("WRITING ") && int.TryParse(line.AsSpan(8), out int p)) Emit("saving", new { Phase = "Writing changes", Percent = p });
                 else if (line == "SAVING") Emit("saving", new { Phase = "Saving", Percent = 100 });
@@ -837,7 +875,7 @@ public sealed class Session : IDisposable
                 else if (line.StartsWith("RESULT code=")) { var m = line.Split(' ')[1]; int.TryParse(m.AsSpan(5), out seenCode); }
             });
             child = ch; ch.P.StandardInput.WriteLine(job); ch.P.StandardInput.Flush();
-            int code = await ch.Done.Task; child = null;
+            int code = await WaitChild(ch, true); child = null;
             if (code == 0)
             {
                 LoadCache(target, CachePolicy.PathFor(target), keepSheet); AddRecent(target);
@@ -858,6 +896,7 @@ public sealed class Session : IDisposable
             {
                 4 => "The file is open in another program or is read-only. Close it there and save again, or use Save As.",
                 6 => "A sheet is protected, so its cells cannot be changed.",
+                7 => "The file changed on disk since you opened it. Use Save As to choose a different file.",
                 2 => "Saving was cancelled. Your changes are still here.",
                 90 => $"Stopped because Windows memory reached {Machine.StopAt:F0}%. Your changes are still here. Close some programs and try again.",
                 _ => "Excel could not save the file. Your changes are still here.",
@@ -894,7 +933,7 @@ public sealed class Session : IDisposable
             foreach (var kv in Edits.ColWidths) { var d = c.Sheets[kv.Key.Sheet]; widths.Add(new { sheet = d.Name, col = d.FirstCol + kv.Key.Col, px = kv.Value }); }
             foreach (var kv in Edits.Freeze) freeze.Add(new { sheet = c.Sheets[kv.Key].Name, rows = kv.Value.Rows, cols = kv.Value.Cols });
         }
-        return JsonSerializer.Serialize(new { source, target, sameFile = same, edits, colWidths = widths, freeze },
+        return JsonSerializer.Serialize(new { source, target, sameFile = same, expectedLength = same ? (long?)c.SourceLength : null, expectedTicks = same ? (long?)c.SourceTicks : null, edits, colWidths = widths, freeze },
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
     }
 }

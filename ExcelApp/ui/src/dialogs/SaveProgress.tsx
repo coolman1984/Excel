@@ -1,7 +1,7 @@
 // Progress for a save through Excel. Shows the phase text and percent, and listens to the
 // saving / saved / saveFailed events the host sends. Cancel is enabled only before Excel opened.
 import { useEffect, useState, type CSSProperties } from "react";
-import { on } from "../bridge";
+import { call, on } from "../bridge";
 
 const FONT = 'Aptos, "Segoe UI Variable", "Segoe UI", Calibri, sans-serif';
 
@@ -46,7 +46,7 @@ export default function SaveProgress(props: { onDone: (ok: boolean) => void }) {
             const p: string = e?.phase ?? "saving";
             setPhase(p);
             setPercent(typeof e?.percent === "number" ? e.percent : 0);
-            setCanCancel(p === "opening"); // only before OPENED, per the plan
+            setCanCancel(e?.canCancel === true); // only before OPENED, per the plan
         });
         const offSaved = on("saved", () => props.onDone(true));
         const offFailed = on("saveFailed", () => props.onDone(false));
@@ -69,7 +69,7 @@ export default function SaveProgress(props: { onDone: (ok: boolean) => void }) {
                     </div>
                 </div>
                 <div style={row}>
-                    <button style={{ ...btn, opacity: canCancel ? 1 : 0.5 }} disabled={!canCancel} onClick={() => props.onDone(false)}>
+                    <button style={{ ...btn, opacity: canCancel ? 1 : 0.5 }} disabled={!canCancel} onClick={() => { void call("cancelSave").catch(() => {}); setCanCancel(false); }}>
                         Cancel
                     </button>
                 </div>

@@ -65,3 +65,33 @@ describe("RowStore", () => {
         expect(store.getRow(0)).toBeUndefined();
     });
 });
+
+
+describe("view invalidation", () => {
+    it("ignores an old response after switching sheets", async () => {
+        const replies: ((value: any) => void)[] = [];
+        const store = new RowStore(() => new Promise(resolve => replies.push(resolve)), () => {});
+        store.setSheet(0, 1); store.ensure(0, 0);
+        store.setSheet(1, 1); store.ensure(0, 0);
+        replies[1]({ rows: [[42, [["new", 2, 0]]]] }); await flush();
+        replies[0]({ rows: [[1, [["old", 2, 0]]]] }); await flush();
+        expect(store.getRow(0)?.rowNumber).toBe(42);
+    });
+    it("reloads changed values and styles instead of repainting stale data", async () => {
+        let text = "before";
+        const store = new RowStore(async () => ({ rows: [[1, [[text, 1, 1, null, null, { bold: text === "after" }]]]] }), () => {});
+        store.setSheet(0, 1); store.ensure(0, 0); await flush();
+        text = "after"; store.invalidateRows([0]); store.ensure(0, 0); await flush();
+        expect(store.getRow(0)?.cells[0].text).toBe("after");
+        expect(store.getRow(0)?.cells[0].style?.bold).toBe(true);
+    });
+});
+
+
+describe("wide sheets", () => {
+    it("continues a block when the host caps each reply", async () => {
+        const store = new RowStore(async (_cmd, a: any) => ({ rows: Array.from({ length: Math.min(3, a.count) }, (_, i) => [a.from + i + 1, [["x", 2, 0]]]) }), () => {});
+        store.setSheet(0, 10); store.ensure(0, 0); await flush();
+        expect(store.getRow(9)?.rowNumber).toBe(10);
+    });
+});

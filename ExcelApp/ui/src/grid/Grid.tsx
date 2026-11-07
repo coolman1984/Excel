@@ -16,6 +16,7 @@ import {
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
 import { call } from "../bridge";
+import { fitCellText, bodyRow, frozenCount } from "./display";
 import { RowStore } from "../rowStore";
 import { ROW_HEIGHT, FROZEN_LINE, FILTER_BLUE, scaledTheme } from "../theme";
 import type { CellData, CellStyle, SheetInfo, Condition } from "../types";
@@ -27,6 +28,7 @@ import type { CellData, CellStyle, SheetInfo, Condition } from "../types";
 /** Extra fields we hang on a TextCell so drawCell can paint Excel styles. */
 export interface ExcelCell extends TextCell {
     excel?: CellStyle;
+    excelKind?: number;
     isRowNumber?: boolean;
     filtered?: boolean;
 }
@@ -68,7 +70,7 @@ interface Props {
     viewKey: number;
 }
 
-const VISIBLE_MARGIN = 400; // two screens of 200-row blocks above and below
+const VISIBLE_MARGIN = 40; // roughly two visible screens above and below
 
 /** Excel column letters for a 0-based column index. */
 export function letters(col0: number): string {
@@ -102,6 +104,33 @@ function useSize(ref: React.RefObject<HTMLDivElement | null>): { width: number; 
     return size;
 }
 
+/** Paint styled text ourselves: Glide's default renderer resets the font. */
+function paintText(ctx: CanvasRenderingContext2D, rect: Rectangle, cell: ExcelCell, theme: { baseFontStyle: string; fontFamily: string; textDark: string }) {
+    const st = cell.excel;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(rect.x, rect.y, rect.width, rect.height); ctx.clip();
+    if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(rect.x, rect.y, rect.width, rect.height); }
+    ctx.font = `${st?.italic ? "italic " : ""}${st?.bold ? "bold " : ""}${theme.baseFontStyle} ${theme.fontFamily}`;
+    ctx.fillStyle = st?.fontColor ?? cell.themeOverride?.textDark ?? theme.textDark;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = cell.contentAlign ?? "left";
+    const text = fitCellText(cell.displayData, cell.excelKind ?? 2, rect.width, s => ctx.measureText(s).width);
+    const x = cell.contentAlign === "right" ? rect.x + rect.width - 4 : cell.contentAlign === "center" ? rect.x + rect.width / 2 : rect.x + 4;
+    ctx.fillText(text, x, rect.y + rect.height / 2);
+    if (st?.underline) {
+        const w = ctx.measureText(text).width;
+        const left = cell.contentAlign === "right" ? x - w : cell.contentAlign === "center" ? x - w / 2 : x;
+        ctx.fillRect(left, rect.y + rect.height - 3, w, 1);
+    }
+    if (st?.border && st.border !== "none") {
+        ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.beginPath();
+        if (st.border === "bottom") { ctx.moveTo(rect.x, rect.y + rect.height - .5); ctx.lineTo(rect.x + rect.width, rect.y + rect.height - .5); }
+        else ctx.rect(rect.x + .5, rect.y + .5, rect.width - 1, rect.height - 1);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
 export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref) {
     const {
         sheet,
@@ -131,6 +160,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
         () =>
             new RowStore(call, (from, count) => {
                 damageCells.current(0, from, colsRef.current, count);
+                if (from === 0) redrawHeader(v => v + 1);
                 const p = pendingScrollRef.current;
                 if (p && from <= p.viewRow && p.viewRow < from + count) {
                     pendingScrollRef.current = null;
@@ -148,7 +178,9 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
     const z = zoom / 100;
     const rowHeight = Math.round(ROW_HEIGHT * z);
     const headerBand = Math.round(ROW_HEIGHT * z);
-    const headerHeight = headerBand * (1 + freeze.rows);
+    const frozen = frozenCount(freeze.rows, viewRows);
+    const headerHeight = headerBand * (1 + frozen);
+    const [headerVersion, redrawHeader] = React.useState(0);
 
     const columns: GridColumn[] = React.useMemo(() => {
         const dataCols: GridColumn[] = [];
@@ -169,16 +201,18 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
     damageCells.current = (x, y, w, h) => {
         const cells: { cell: Item }[] = [];
         const x1 = Math.min(x + w, colsRef.current);
-        for (let r = y; r < y + h; r++) for (let c = x; c < x1; c++) cells.push({ cell: [c, r] });
+        if (frozen > 0 && y < frozen) for (let c = x; c < x1; c++) cells.push({ cell: [c, -1] });
+        for (let r = Math.max(y, frozen); r < y + h; r++) for (let c = x; c < x1; c++) cells.push({ cell: [c, r - frozen] });
         editorRef.current?.updateCells(cells);
     };
 
     const refresh = React.useCallback(() => {
         store.clear();
         const v = lastVisibleRef.current;
-        store.ensure(v.y - VISIBLE_MARGIN, v.y + v.height + VISIBLE_MARGIN);
+        store.ensure(0, frozen - 1);
+        store.ensure(v.y + frozen - VISIBLE_MARGIN, v.y + frozen + v.height + VISIBLE_MARGIN);
         damageCells.current(0, v.y, colsRef.current, Math.max(v.height, 40));
-    }, [store]);
+    }, [store, frozen]);
 
     React.useEffect(() => {
         store.setSheet(sheet.index, viewRows);
@@ -197,16 +231,16 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             const cur = s.current;
             if (cur) {
                 const r = cur.range;
-                return { r1: r.y, c1: Math.max(0, r.x - 1), r2: r.y + r.height - 1, c2: Math.max(0, r.x + r.width - 2) };
+                return { r1: bodyRow(r.y, frozen), c1: Math.max(0, r.x - 1), r2: bodyRow(r.y + r.height - 1, frozen), c2: Math.max(0, r.x + r.width - 2) };
             }
             const rowsArr = s.rows.toArray();
             const colsArr = s.columns.toArray();
-            if (rowsArr.length > 0) return { r1: rowsArr[0], c1: 0, r2: rowsArr[rowsArr.length - 1], c2: sheet.cols - 1 };
+            if (rowsArr.length > 0) return { r1: bodyRow(rowsArr[0], frozen), c1: 0, r2: bodyRow(rowsArr[rowsArr.length - 1], frozen), c2: sheet.cols - 1 };
             if (colsArr.length > 0)
                 return { r1: 0, c1: colsArr[0] - 1, r2: Math.max(0, viewRows - 1), c2: colsArr[colsArr.length - 1] - 1 };
             return { r1: 0, c1: 0, r2: 0, c2: 0 };
         },
-        [sheet.cols, viewRows]
+        [sheet.cols, viewRows, frozen]
     );
 
     const onGridSelectionChange = React.useCallback(
@@ -226,31 +260,36 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
                 if (!cells || cells.length === 0) return;
                 const rows = new Set<number>();
                 for (const c of cells) rows.add(c[0]);
+                store.invalidateRows(rows);
+                for (const r of rows) store.ensure(r, r);
                 for (const r of rows) damageCells.current(0, r, colsRef.current, 1);
             },
             scrollTo: (viewRow: number, col = 1) => {
-                pendingScrollRef.current = { viewRow, t0: performance.now() };
-                editorRef.current?.scrollTo(col, viewRow, "vertical");
+                const pendingStart = performance.now();
+                pendingScrollRef.current = { viewRow, t0: pendingStart };
+                store.ensure(viewRow, viewRow + 40);
+                editorRef.current?.scrollTo(col, Math.max(0, viewRow - frozen), "vertical");
+                if (store.getRow(viewRow)) requestAnimationFrame(() => {
+                    pendingScrollRef.current = null; onPaint(performance.now() - (pendingStart));
+                });
             },
             setSelection: (r1, c1, r2, c2) => {
                 const x = Math.min(c1, c2) + 1;
-                const y = Math.min(r1, r2);
+                const y = Math.max(0, Math.min(r1, r2) - frozen);
                 const w = Math.abs(c2 - c1) + 1;
-                const h = Math.abs(r2 - r1) + 1;
                 const next: GridSelection = {
-                    columns: CompactSelection.empty(),
-                    rows: CompactSelection.empty(),
-                    current: { cell: [x, y], range: { x, y, width: w, height: h }, rangeStack: [] },
+                    columns: CompactSelection.empty(), rows: CompactSelection.empty(),
+                    current: Math.max(r1, r2) < frozen ? undefined : { cell: [x, y], range: { x, y, width: w, height: Math.max(1, Math.max(r1, r2) - Math.max(frozen, Math.min(r1, r2)) + 1) }, rangeStack: [] },
                 };
                 setSel(next);
-                selRef.current = computeRange(next);
-                onSelectionChange(selRef.current);
+                selRef.current = { r1, c1, r2, c2 };
+                onSelectionChange(selRef.current); redrawHeader(v => v + 1);
             },
             getSelection: () => selRef.current,
             store,
             focus: () => editorRef.current?.focus(),
         }),
-        [refresh, store, computeRange, onSelectionChange]
+        [refresh, store, computeRange, onSelectionChange, frozen, onPaint]
     );
 
     const toExcelCell = React.useCallback((cd: CellData): ExcelCell => {
@@ -263,6 +302,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             allowOverlay: true,
             contentAlign: alignToContent(align),
             excel: st,
+            excelKind: cd.kind,
             themeOverride: cd.color ? { textDark: cd.color } : undefined,
         };
         return cell;
@@ -284,7 +324,8 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
 
     const getCellContent = React.useCallback(
         (cell: Item): GridCell => {
-            const [col, row] = cell;
+            const [col, body] = cell;
+            const row = bodyRow(body, frozen);
             const wire = store.getRow(row);
             if (wire === undefined) {
                 store.ensure(row, row);
@@ -295,50 +336,13 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             if (cd === undefined) return loadingCell;
             return toExcelCell(cd);
         },
-        [store, rowNumberCell, toExcelCell]
+        [store, rowNumberCell, toExcelCell, frozen]
     );
 
     const drawCell = React.useCallback<DrawCellCallback>((args, done) => {
         const cell = args.cell as ExcelCell;
-        const st = cell.excel;
-        if (!st) {
-            done();
-            return;
-        }
-        const { ctx, rect } = args;
-        if (st.fill) {
-            ctx.fillStyle = st.fill;
-            ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-        }
-        if (st.border && st.border !== "none") {
-            ctx.save();
-            ctx.strokeStyle = "#000000";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            if (st.border === "bottom") {
-                ctx.moveTo(rect.x, rect.y + rect.height - 0.5);
-                ctx.lineTo(rect.x + rect.width, rect.y + rect.height - 0.5);
-            } else {
-                ctx.rect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
-            }
-            ctx.stroke();
-            ctx.restore();
-        }
-        const prevFont = ctx.font;
-        const baseFont = (args.theme as any).baseFontFull ?? "";
-        ctx.font = `${st.italic ? "italic " : ""}${st.bold ? "bold " : ""}${baseFont}`;
-        const prevTheme = args.theme;
-        if (st.fontColor) args.theme = { ...args.theme, textDark: st.fontColor };
-        done();
-        args.theme = prevTheme;
-        ctx.font = prevFont;
-        if (st.underline) {
-            ctx.save();
-            ctx.fillStyle = st.fontColor ?? "#000000";
-            const w = Math.min(rect.width - 8, ctx.measureText(cell.displayData).width);
-            ctx.fillRect(rect.x + 4, rect.y + rect.height - 3, w, 1);
-            ctx.restore();
-        }
+        if (cell.kind !== GridCellKind.Text) { done(); return; }
+        paintText(args.ctx, args.rect, cell, args.theme);
     }, []);
 
     const drawHeader = React.useCallback<DrawHeaderCallback>(
@@ -357,32 +361,20 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
                 ctx.fillText(String(column.title ?? ""), rect.x + rect.width / 2, rect.y + band / 2);
                 ctx.restore();
             }
-            for (let i = 0; i < freeze.rows; i++) {
+            for (let i = 0; i < frozen; i++) {
                 const top = rect.y + band + i * rowHeight;
                 ctx.fillStyle = i % 2 === 0 ? t.bgCell : t.bgCellMedium;
                 ctx.fillRect(rect.x, top, rect.width, rowHeight);
-                if (a.columnIndex > 0) {
-                    const cd = store.getRow(i)?.cells[a.columnIndex - 1];
-                    if (cd) {
-                        const align = cd.style?.align ?? cd.align;
-                        ctx.save();
-                        ctx.fillStyle = cd.color ?? t.textDark;
-                        ctx.font = t.baseFontFull ?? `${t.baseFontStyle} ${t.fontFamily}`;
-                        ctx.textBaseline = "middle";
-                        if (align === 1) {
-                            ctx.textAlign = "right";
-                            ctx.fillText(cd.text, rect.x + rect.width - 4, top + rowHeight / 2);
-                        } else if (align === 2) {
-                            ctx.textAlign = "center";
-                            ctx.fillText(cd.text, rect.x + rect.width / 2, top + rowHeight / 2);
-                        } else {
-                            ctx.textAlign = "left";
-                            ctx.fillText(cd.text, rect.x + 4, top + rowHeight / 2);
-                        }
-                        ctx.restore();
-                    }
+                const wire = store.getRow(i);
+                const cd = wire?.cells[a.columnIndex - 1];
+                const cell = a.columnIndex === 0 && wire ? rowNumberCell(wire.rowNumber) : cd ? toExcelCell(cd) : undefined;
+                if (cell) paintText(ctx, { x: rect.x, y: top, width: rect.width, height: rowHeight }, cell, a.theme);
+                const selection = selRef.current;
+                if (i >= selection.r1 && i <= selection.r2 && a.columnIndex - 1 >= selection.c1 && a.columnIndex - 1 <= selection.c2) {
+                    ctx.save(); ctx.strokeStyle = "#107C41"; ctx.strokeRect(rect.x + 1, top + 1, rect.width - 2, rowHeight - 2); ctx.restore();
                 }
             }
+
             ctx.save();
             if (freeze.rows > 0) {
                 ctx.strokeStyle = FROZEN_LINE;
@@ -399,7 +391,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             ctx.restore();
             void _drawContent;
         },
-        [headerBand, rowHeight, freeze.rows, showHeadings, store]
+        [headerBand, rowHeight, frozen, showHeadings, store, rowNumberCell, toExcelCell, headerVersion]
     );
 
     const getCellsForSelection = React.useCallback(
@@ -407,7 +399,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             const emptyCell: TextCell = { kind: GridCellKind.Text, data: "", displayData: "", allowOverlay: false };
             const out: GridCell[][] = [];
             for (let y = range.y; y < range.y + range.height; y++) {
-                const wire = store.getRow(y);
+                const wire = store.getRow(bodyRow(y, frozen));
                 const rowCells: GridCell[] = [];
                 for (let x = range.x; x < range.x + range.width; x++) {
                     if (wire === undefined) {
@@ -423,21 +415,21 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             }
             return out;
         },
-        [store, rowNumberCell, toExcelCell]
+        [store, rowNumberCell, toExcelCell, frozen]
     );
 
     const handleCellEdited = React.useCallback(
         (cell: Item, newValue: GridCell) => {
             const [col, row] = cell;
             if (col <= 0) return;
-            onCellEdited(row, col - 1, (newValue as TextCell).data);
+            onCellEdited(bodyRow(row, frozen), col - 1, (newValue as TextCell).data);
         },
-        [onCellEdited]
+        [onCellEdited, frozen]
     );
 
     const handleDelete = React.useCallback(
         (selection: GridSelection) => {
-            const r = computeRange(selection);
+            const r = selection.current ? computeRange(selection) : selRef.current;
             onDeleteRanges([[r.r1, r.c1, r.r2, r.c2]]);
             return false;
         },
@@ -448,12 +440,12 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
         (e: FillPatternEventArgs) => {
             const src = e.patternSource;
             const dst = e.fillDestination;
-            const from = [src.y, Math.max(0, src.x - 1), src.y + src.height - 1, Math.max(0, src.x + src.width - 2)];
-            const to = [dst.y, Math.max(0, dst.x - 1), dst.y + dst.height - 1, Math.max(0, dst.x + dst.width - 2)];
+            const from = [bodyRow(src.y, frozen), Math.max(0, src.x - 1), bodyRow(src.y + src.height - 1, frozen), Math.max(0, src.x + src.width - 2)];
+            const to = [bodyRow(dst.y, frozen), Math.max(0, dst.x - 1), bodyRow(dst.y + dst.height - 1, frozen), Math.max(0, dst.x + dst.width - 2)];
             onFill(from, to);
             e.preventDefault();
         },
-        [onFill]
+        [onFill, frozen]
     );
 
     const handleCellClicked = React.useCallback(
@@ -483,9 +475,11 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
     const onVisible = React.useCallback(
         (range: Rectangle) => {
             lastVisibleRef.current = range;
-            store.ensure(range.y - VISIBLE_MARGIN, range.y + range.height + VISIBLE_MARGIN);
+            store.ensure(0, frozen - 1);
+            store.ensure(range.y + frozen, range.y + frozen + range.height);
+            store.ensure(range.y + frozen - VISIBLE_MARGIN, range.y + frozen + range.height + VISIBLE_MARGIN);
         },
-        [store]
+        [store, frozen]
     );
 
     const theme = React.useMemo(() => {
@@ -495,7 +489,8 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
             t.horizontalBorderColor = "transparent";
         }
         return t;
-    }, [zoom, showGridlines]);
+    // Glide's blit check ignores drawHeader identity. A new theme forces the frozen band to repaint.
+    }, [zoom, showGridlines, headerVersion]);
 
     return (
         <div className="gridHost" ref={containerRef}>
@@ -504,7 +499,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
                 width={width}
                 height={height}
                 columns={columns}
-                rows={viewRows}
+                rows={Math.max(0, viewRows - frozen)}
                 rowHeight={rowHeight}
                 headerHeight={headerHeight}
                 freezeColumns={1 + freeze.cols}
@@ -520,6 +515,15 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
                 onFillPattern={handleFill}
                 onPaste={() => false}
                 onCellClicked={handleCellClicked}
+                onHeaderClicked={(col, e) => {
+                    const y = e.localEventY;
+                    if (y >= headerBand && col > 0) {
+                        const row = Math.min(frozen - 1, Math.floor((y - headerBand) / rowHeight));
+                        selRef.current = { r1: row, c1: col - 1, r2: row, c2: col - 1 };
+                        setSel({ columns: CompactSelection.empty(), rows: CompactSelection.empty() });
+                        onSelectionChange(selRef.current); redrawHeader(v => v + 1);
+                    }
+                }}
                 onHeaderMenuClick={handleHeaderMenu}
                 drawCell={drawCell}
                 drawHeader={drawHeader}
@@ -529,7 +533,8 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
                 columnSelect="multi"
                 rowSelect="multi"
                 fillHandle
-                keybindings={{ copy: false, cut: false, paste: false, delete: false, selectAll: false }}
+                keybindings={{ copy: false, cut: false, paste: false, delete: false, selectAll: false,
+                    goToFirstCell: false, goToLastCell: false, goToFirstRow: false, goToLastRow: false }}
             />
         </div>
     );

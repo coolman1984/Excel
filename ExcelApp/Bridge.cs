@@ -13,7 +13,7 @@ public sealed class Bridge
     readonly SemaphoreSlim serial = new(1, 1);
     readonly Dictionary<string, Func<JsonElement, Task<object?>>> handlers = new();
     // Commands that only read; they may run beside a long command.
-    static readonly HashSet<string> Parallel = new() { "ready", "rows", "cellDetail", "recent", "log", "locate", "edge", "info", "cancelOpen", "cancelSave", "stats", "closeAnswer" };
+    static readonly HashSet<string> Parallel = new() { "ready", "recent", "log", "cancelOpen", "cancelSave", "closeAnswer" };
     public Action<string>? Post;
     static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals };
 
@@ -43,8 +43,10 @@ public sealed class Bridge
             using var doc = JsonDocument.Parse(json); var root = doc.RootElement.Clone();
             id = root.TryGetProperty("id", out var i) ? i.GetInt32() : 0;
             cmd = root.GetProperty("cmd").GetString() ?? "";
-            if (!handlers.TryGetValue(cmd, out var h)) throw new UserError("That command is not known.");
+            if (!handlers.TryGetValue(cmd, out var h)) { cmd = "unknown"; throw new UserError("That command is not known."); }
             if (!Parallel.Contains(cmd)) { await serial.WaitAsync(); locked = true; }
+            if (session.Busy && cmd is not ("ready" or "recent" or "log" or "cancelOpen" or "cancelSave" or "closeAnswer"))
+                throw new UserError("Please wait until the current work is finished.");
             object? result = await h(root);
             if (cmd != "rows" && cmd != "log") Log.Write($"cmd {cmd} {sw.ElapsedMilliseconds} ms");
             return JsonSerializer.Serialize(new { id, ok = true, result }, Json);

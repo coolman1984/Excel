@@ -18,6 +18,7 @@ static class Program
         bool unattended = a.Length >= 1 && a[0] is "--build" or "--save" or "--selftest";
         try
         {
+            if (unattended && ((a[0] == "--build" && a.Length != 2) || (a[0] == "--save" && a.Length != 1) || (a[0] == "--selftest" && a.Length != 3))) { Console.WriteLine("ERROR arguments"); return 2; }
             if (a.Length >= 2 && a[0] == "--build") return BuildMode(a[1]);
             if (a.Length >= 1 && a[0] == "--save")
             {
@@ -54,7 +55,7 @@ static class Program
         using var o = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
         bool gone = false;
         new Thread(() => { try { while (Console.In.ReadLine() != null) { } } catch (IOException) { } gone = true; }) { IsBackground = true }.Start();
-        var r = CacheBuilder.Build(source, CachePolicy.PathFor(source), o.WriteLine, () => gone);
+        var r = WorkbookReader.Build(source, o.WriteLine, () => gone);
         o.WriteLine(string.Create(CultureInfo.InvariantCulture, $"RESULT code={r.Code} stopped={r.Stopped} excelStart={r.ExcelStartSec:F1}s open={r.OpenSec:F1}s formats={r.FormatSec:F1}s read={r.ReadSec:F1}s check={r.VerifySec:F1}s sheets={r.Sheets} cells={r.Cells} cacheMB={r.CacheBytes / 1048576.0:F1} formatsTotal={r.Formats} formatsMatched={r.FormatsOk} formatsNotCarried={r.FormatsFailed} formatsNoCells={r.FormatsUnused} unreadFormatRuns={r.UnreadRuns} peakExcelMB={r.PeakExcelMB} peakCommit={r.PeakCommit:F1}%"));
         return r.Code;
     }
@@ -120,6 +121,8 @@ static class Program
         var sw = Stopwatch.StartNew();
         f.Session.Open(source);
         if (!await WaitJs(f, "window.__app.state()", "ready", 400)) { Console.WriteLine("ERROR the file did not open"); return 1; }
+        if (!await WaitJs(f, "String(window.__app.hasRows())", "true", 30)) { Console.WriteLine("ERROR the first rows did not arrive"); return 1; }
+        await Task.Delay(32);
         double total = (DateTime.Now - proc.StartTime).TotalMilliseconds;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"FIRST SCREEN {total:F0} ms from process start (page ready at {pageMs:F0} ms, open to screen {sw.Elapsed.TotalMilliseconds:F0} ms)"));
         await Task.Delay(300); await Shot(f, Path.Combine(folder, "open.png"));
@@ -139,10 +142,13 @@ static class Program
         proc.Refresh(); Console.WriteLine($"MEMORY host {proc.PrivateMemorySize64 / 1048576} MB");
         Console.WriteLine($"MEMORY webview {WebViewMB(f)} MB");
 
+        await Js(f, "window.__app.scrollTo(0); 'x'"); await Task.Delay(300);
         await Js(f, "window.__app.run('freeze', 2, 1); window.__app.run('zoom', 150); 'x'"); await Task.Delay(500);
         await Shot(f, Path.Combine(folder, "view.png"));
         await Js(f, "window.__app.run('zoom', 100); 'x'");
-        await Js(f, "window.__app.run('select', 1, 1, 3, 2); window.__app.run('style', [1,1,3,2], {bold:true, fill:'#FFFF00', align:1, numberFormat:'0.00%'}); 'x'"); await Task.Delay(500);
+        await Js(f, "window.__styleDone=false; window.__app.run('select',1,1,3,2); window.__app.run('edit',1,1,'0.125').then(()=>window.__app.run('style',[1,1,3,2],{bold:true,fill:'#FFFF00',align:1,numberFormat:'0.00%'})).then(()=>window.__styleDone=true); 'x'");
+        if (!await WaitJs(f, "String(window.__styleDone)", "true", 30)) { Console.WriteLine("ERROR style action failed"); return 1; }
+        await Task.Delay(300);
         await Shot(f, Path.Combine(folder, "styles.png"));
         // Host-side timings through the same bridge the interface uses.
         var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
@@ -161,6 +167,10 @@ static class Program
             while (w.Elapsed.TotalSeconds < secs) { foreach (var j in seen) if (j.Contains("\"event\":\"" + name + "\"")) return true; await Task.Delay(20); }
             return false;
         }
+        var detail = await Cmd("cellDetail", "\"sheet\":0,\"row\":1,\"col\":1");
+        bool styleOk = detail.GetProperty("style").GetProperty("bold").GetBoolean() && detail.GetProperty("style").GetProperty("fill").GetString() == "#FFFF00" && detail.GetProperty("format").GetString() == "0.00%";
+        Console.WriteLine("STYLE wire/detail: " + (styleOk ? "pass" : "fail"));
+        if (!styleOk) return 1;
         var cache = f.Session.Cache!; int big = 0; for (int i = 0; i < cache.Sheets.Count; i++) if (cache.Sheets[i].Cells > cache.Sheets[big].Cells) big = i;
         await Cmd("sheet", $"\"sheet\":{big}");
         int numCol = -1, textCol = -1; { var cells = (await Cmd("rows", $"\"sheet\":{big},\"from\":1,\"count\":1")).GetProperty("rows")[0][1];
@@ -170,7 +180,7 @@ static class Program
             var fv = await Cmd("filterValues", $"\"sheet\":{big},\"col\":{textCol}");
             string first = fv.GetProperty("values")[0].GetProperty("text").GetString()!;
             string valuesJson = System.Text.Json.JsonSerializer.Serialize(new[] { first });
-            await Js(f, $"window.__app.run('filter', {textCol + 1}, {valuesJson}); 'x'"); await Task.Delay(1500);
+            await Js(f, $"window.__app.run('filter', {textCol}, {valuesJson}); 'x'"); await Task.Delay(1500);
             await Shot(f, Path.Combine(folder, "filter.png"));
             await Cmd("clearFilters", $"\"sheet\":{big}");
         }
@@ -195,7 +205,7 @@ static class Program
         if (File.Exists(small))
         {
             while (seen.TryDequeue(out _)) { }
-            f.Session.Open(small);
+            f.Session.Open(small, discard: true);
             if (!await WaitEvent("opened", 400)) { Console.WriteLine("ERROR the small file did not open"); return 1; }
             await Task.Delay(300); while (seen.TryDequeue(out _)) { }
             for (int i = 0; i < 100; i++) await Cmd("setCell", $"\"sheet\":0,\"row\":{i + 1},\"col\":0,\"input\":\"{i}\"");

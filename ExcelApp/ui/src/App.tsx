@@ -44,6 +44,7 @@ export function App(): React.ReactElement {
     const [selection, setSelection] = React.useState<SelRange>({ r1: 0, c1: 0, r2: 0, c2: 0 });
     const [cellRaw, setCellRaw] = React.useState("");
     const [cellAddress, setCellAddress] = React.useState("A1");
+    const [cellEndAddress, setCellEndAddress] = React.useState("A1");
     const [zoom, setZoom] = React.useState(100);
     const [gridlines, setGridlines] = React.useState(true);
     const [headings, setHeadings] = React.useState(true);
@@ -68,7 +69,7 @@ export function App(): React.ReactElement {
 
     // Keep the latest values for the window.__app self-test hooks.
     const live = React.useRef<any>({});
-    live.current = { state, selection, sheetIndex, sheet, zoom, freeze, viewRows, filterActive };
+    live.current = { state, selection, sheetIndex, sheet, zoom, freeze, viewRows, filterActive, dirty, fileName: workbook?.name, workbook };
 
     const loadSheet = React.useCallback(async (index: number) => {
         setStatus("Reading...");
@@ -99,7 +100,11 @@ export function App(): React.ReactElement {
                 setWorkbook(wb);
                 setState("ready");
                 setDirty(!!wb.dirty);
-                setSelection({ r1: 0, c1: 0, r2: 0, c2: 0 });
+                const index = e.keep ? Math.min(live.current.sheetIndex ?? 0, wb.sheets.length - 1) : ((wb as any).currentSheet ?? wb.sheets.findIndex(s => !s.hidden));
+                const nextSheet = Math.max(0, index);
+                setSheetIndex(nextSheet);
+                setFreeze({ rows: wb.sheets[nextSheet]?.frozenRows ?? 0, cols: wb.sheets[nextSheet]?.frozenCols ?? 0 });
+                if (!e.keep) setSelection({ r1: 0, c1: 0, r2: 0, c2: 0 });
                 setFileInfo({
                     name: wb.name,
                     path: wb.path,
@@ -109,12 +114,21 @@ export function App(): React.ReactElement {
                     nasaProtected: true,
                 });
                 setStatus("Ready");
-                void loadSheet(live.current.sheetIndex ?? 0);
+                void loadSheet(nextSheet).then(async () => {
+                    const info: any = await call("info");
+                    setFileInfo({ name: wb.name, path: wb.path, sizeBytes: info.size, lastRead: info.readTime, cacheBytes: info.cacheBytes, nasaProtected: !!info.nasca });
+                }).catch(() => {});
             })
         );
         offs.push(onEvent("openFailed", (e) => {
             setState("empty");
             setStatus("Could not open the file: " + (e.error ?? ""));
+        }));
+        offs.push(onEvent("closeRequested", (e) => {
+            setDialog({ name: "ClosePrompt", props: { fileName: e.fileName, onAnswer: (action: string) => {
+                setDialog(null);
+                void call("closeAnswer", { action });
+            } } });
         }));
         offs.push(onEvent("saving", (e) => setStatus(e.phase + "...")));
         offs.push(onEvent("saved", () => {
@@ -152,9 +166,13 @@ export function App(): React.ReactElement {
         (async () => {
             try {
                 const d: any = await call("cellDetail", { sheet: sheetIndex, row: activeCell.row, col: activeCell.col });
+                const end: any = selection.r1 === selection.r2 && selection.c1 === selection.c2 ? d : await call("cellDetail", { sheet: sheetIndex, row: selection.r2, col: selection.c2 });
                 if (!cancelled) {
+                    setCellEndAddress(end.address ?? d.address);
                     setCellRaw(d.raw ?? "");
                     setCellAddress(d.address ?? "A1");
+                    setFmtFlags({ bold: !!d.style?.bold, italic: !!d.style?.italic, underline: !!d.style?.underline });
+                    setNumFmt(d.format ?? GENERAL);
                 }
             } catch {
                 /* ignore transient errors */
@@ -163,7 +181,7 @@ export function App(): React.ReactElement {
         return () => {
             cancelled = true;
         };
-    }, [state, sheetIndex, activeCell.row, activeCell.col, viewKey]);
+    }, [state, sheetIndex, activeCell.row, activeCell.col, selection.r2, selection.c2, viewKey]);
 
     React.useEffect(() => {
         if (state !== "ready") {
@@ -195,30 +213,43 @@ export function App(): React.ReactElement {
         if (changed && changed.length > 0) gridRef.current?.invalidateCells(changed);
     }, []);
 
-    const openBrowse = React.useCallback(async () => {
-        const r: any = await call("pickFile");
-        if (r?.path) {
-            setState("opening");
-            await call("open", { path: r.path });
-        }
+    const confirmLeave = React.useCallback((next: () => Promise<void>) => {
+        if (!live.current.dirty) { void next().catch((e: Error) => setStatus(e.message)); return; }
+        setDialog({ name: "ClosePrompt", props: { fileName: live.current.fileName, onAnswer: async (action: string) => {
+            setDialog(null);
+            if (action === "cancel") return;
+            try {
+                if (action === "save") {
+                    const result: any = await call("save", { saveAs: false });
+                    if (!result?.saved) return;
+                }
+                await next();
+            } catch (e) { setStatus((e as Error).message); }
+        } } });
     }, []);
 
     const openPath = React.useCallback(async (path: string) => {
-        setState("opening");
-        await call("open", { path });
-    }, []);
+        confirmLeave(async () => { await call("open", { path, discard: true }); });
+    }, [confirmLeave]);
+
+    const openBrowse = React.useCallback(async () => {
+        const r: any = await call("pickFile");
+        if (r?.path) await openPath(r.path);
+    }, [openPath]);
 
     const doSave = React.useCallback(
         (saveAs: boolean) => {
             if (!sheet) return;
             setDialog({ name: "SaveProgress", props: { onDone: () => setDialog(null) } });
-            void call("save", { saveAs });
+            void call("save", { saveAs }).then((r: any) => {
+                if (r?.cancelled) setDialog(null);
+            }).catch((e: Error) => { setDialog(null); setStatus(e.message); });
         },
         [sheet]
     );
 
     const goToAddress = React.useCallback(
-        (addr: string) => {
+        async (addr: string) => {
             if (!sheet) return;
             const m = /^\s*([A-Za-z]+)\s*(\d+)\s*(?::\s*([A-Za-z]+)\s*(\d+))?\s*$/.exec(addr);
             if (!m) return;
@@ -226,15 +257,21 @@ export function App(): React.ReactElement {
             const r1 = Number(m[2]) - sheet.firstRow;
             const c2 = m[3] ? colFromLetters(m[3]) - sheet.firstCol : c1;
             const r2 = m[4] ? Number(m[4]) - sheet.firstRow : r1;
-            gridRef.current?.setSelection(r1, c1, r2, c2);
-            gridRef.current?.scrollTo(r1, c1 + 1);
+            if (c1 < 0 || c2 < 0 || c1 >= sheet.cols || c2 >= sheet.cols) return;
+            const a: any = await call("locate", { sheet: sheetIndex, row: r1 });
+            const b: any = await call("locate", { sheet: sheetIndex, row: r2 });
+            if (a.view < 0 || b.view < 0) { setStatus("This cell is hidden by a filter"); return; }
+            gridRef.current?.setSelection(a.view, c1, b.view, c2);
+            gridRef.current?.scrollTo(a.view, c1 + 1);
         },
-        [sheet]
+        [sheet, sheetIndex]
     );
 
     const selectSheet = React.useCallback(
         (index: number) => {
             setSheetIndex(index);
+            const next = live.current.workbook?.sheets?.[index];
+            if (next) setFreeze({ rows: next.frozenRows ?? 0, cols: next.frozenCols ?? 0 });
             setSelection({ r1: 0, c1: 0, r2: 0, c2: 0 });
             void loadSheet(index);
         },
@@ -276,9 +313,9 @@ export function App(): React.ReactElement {
     );
 
     const clearRanges = React.useCallback(
-        async (ranges: number[][]) => {
+        async (ranges: number[][], what = "contents") => {
             if (!sheet) return;
-            const res: any = await call("clearCells", { sheet: sheetIndex, ranges });
+            const res: any = await call("clearCells", { sheet: sheetIndex, ranges, what });
             applyChanged(res.changed);
             setDirty(true);
         },
@@ -313,15 +350,19 @@ export function App(): React.ReactElement {
 
     const doUndo = React.useCallback(async () => {
         if (!sheet) return;
-        await call("undo", { sheet: sheetIndex });
+        const r: any = await call("undo", { sheet: sheetIndex });
+        setDirty(!!r.dirty);
+        if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView]);
+    }, [sheet, sheetIndex, refreshView, selectSheet]);
 
     const doRedo = React.useCallback(async () => {
         if (!sheet) return;
-        await call("redo", { sheet: sheetIndex });
+        const r: any = await call("redo", { sheet: sheetIndex });
+        setDirty(!!r.dirty);
+        if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView]);
+    }, [sheet, sheetIndex, refreshView, selectSheet]);
 
     const toggleBold = React.useCallback(() => {
         const v = !fmtFlags.bold;
@@ -365,14 +406,9 @@ export function App(): React.ReactElement {
         void applyStyle({ numberFormat: c });
     }, [numFmt, applyStyle]);
 
-    const onClearAll = React.useCallback(() => {
-        void clearRanges(rangesNow());
-        void applyStyle({ numberFormat: GENERAL, bold: false, italic: false, underline: false });
-    }, [clearRanges, rangesNow, applyStyle]);
+    const onClearAll = React.useCallback(() => void clearRanges(rangesNow(), "all"), [clearRanges, rangesNow]);
     const onClearContents = React.useCallback(() => void clearRanges(rangesNow()), [clearRanges, rangesNow]);
-    const onClearFormats = React.useCallback(() => {
-        void applyStyle({ numberFormat: GENERAL, bold: false, italic: false, underline: false });
-    }, [applyStyle]);
+    const onClearFormats = React.useCallback(() => void clearRanges(rangesNow(), "formats"), [clearRanges, rangesNow]);
 
     const numberAbove = React.useCallback(
         (row: number, col: number): boolean => gridRef.current?.store.getRow(row - 1)?.cells[col]?.kind === 1,
@@ -457,16 +493,23 @@ export function App(): React.ReactElement {
                 props: {
                     sheet: sheetIndex,
                     initialTab,
-                    onSelect: (s: number, r: number, c: number) => {
-                        selectSheet(s);
-                        gridRef.current?.setSelection(r, c, r, c);
-                        gridRef.current?.scrollTo(r, c + 1);
+                    onChanged: (r: any) => { setDirty(!!r.dirty); refreshView(); },
+                    onSelect: async (s: number, r: number, c: number) => {
+                        const loc: any = await call("locate", { sheet: s, row: r });
+                        if (loc.view < 0) { setStatus("This cell is hidden by a filter"); return; }
+                        await loadSheet(s); setSheetIndex(s);
+                        const next = live.current.workbook?.sheets?.[s];
+                        if (next) setFreeze({ rows: next.frozenRows ?? 0, cols: next.frozenCols ?? 0 });
+                        requestAnimationFrame(() => {
+                            gridRef.current?.setSelection(loc.view, c, loc.view, c);
+                            gridRef.current?.scrollTo(loc.view, c + 1);
+                        });
                     },
                     onClose: () => setDialog(null),
                 },
             });
         },
-        [sheetIndex, selectSheet]
+        [sheetIndex, loadSheet]
     );
 
     const dlgGoTo = React.useCallback(() => {
@@ -478,7 +521,7 @@ export function App(): React.ReactElement {
             if (!sheet) return;
             const dir = cmd === "edgeUp" ? "up" : cmd === "edgeDown" ? "down" : cmd === "edgeLeft" ? "left" : "right";
             const wire = gridRef.current?.store.getRow(activeCell.row);
-            const realRow = wire ? wire.rowNumber - 1 : activeCell.row;
+            const realRow = wire ? wire.rowNumber - sheet.firstRow : activeCell.row;
             try {
                 const res: any = await call("edge", { sheet: sheetIndex, row: realRow, col: activeCell.col, direction: dir });
                 const loc: any = await call("locate", { sheet: sheetIndex, row: res.row });
@@ -530,6 +573,8 @@ export function App(): React.ReactElement {
                 case "filterToggle": setFilterMode((f) => !f); return true;
                 case "clear": void clearRanges(rangesNow()); return true;
                 case "openFilter": if (sheet) openFilterMenu(activeCell.col, 120, 120); return true;
+                case "firstCell": gridRef.current?.setSelection(0, 0, 0, 0); gridRef.current?.scrollTo(0, 1); return true;
+                case "lastCell": if (sheet) { const r = Math.max(0, viewRows - 1), c = Math.max(0, sheet.cols - 1); gridRef.current?.setSelection(r, c, r, c); gridRef.current?.scrollTo(r, c + 1); } return true;
                 case "selectAll": if (sheet) gridRef.current?.setSelection(0, 0, Math.max(0, viewRows - 1), sheet.cols - 1); return true;
                 case "prevSheet": selectSheet(Math.max(0, sheetIndex - 1)); return true;
                 case "nextSheet": selectSheet(Math.min((workbook?.sheets.length ?? 1) - 1, sheetIndex + 1)); return true;
@@ -552,7 +597,7 @@ export function App(): React.ReactElement {
     dispatchRef.current = dispatch;
     const paintRef = React.useRef(0);
     const apiRef = React.useRef<any>({});
-    apiRef.current = { applyFreeze, setZoomPct, runFilter, runStyle };
+    apiRef.current = { applyFreeze, setZoomPct, runFilter, runStyle, commitCell };
 
     React.useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -571,13 +616,15 @@ export function App(): React.ReactElement {
     React.useEffect(() => {
         const host: any = {
             state: () => live.current.state,
+            hasRows: () => !!gridRef.current?.store.getRow(0),
             scrollTo: (v: number) => gridRef.current?.scrollTo(v),
             run: (action: string, ...args: any[]) => {
                 const api = apiRef.current;
                 if (action === "freeze") api.applyFreeze(args[0] ?? 0, args[1] ?? 0);
                 else if (action === "zoom") api.setZoomPct(args[0] ?? 100);
-                else if (action === "filter") void api.runFilter(args[0], args[1] ?? []);
-                else if (action === "style") void api.runStyle(args[0], args[1] ?? {});
+                else if (action === "filter") return api.runFilter(args[0], args[1] ?? []);
+                else if (action === "style") return api.runStyle(args[0], args[1] ?? {});
+                else if (action === "edit") return api.commitCell(args[0], args[1], args[2]);
                 else if (action === "select") gridRef.current?.setSelection(args[0], args[1], args[2], args[3]);
             },
         };
@@ -596,12 +643,11 @@ export function App(): React.ReactElement {
 
     const displayAddress = React.useMemo(() => {
         if (!sheet) return "A1";
-        const a = lettersFromCol(selection.c1 + sheet.firstCol) + (selection.r1 + sheet.firstRow);
         if (selection.r1 !== selection.r2 || selection.c1 !== selection.c2) {
-            return a + ":" + lettersFromCol(selection.c2 + sheet.firstCol) + (selection.r2 + sheet.firstRow);
+            return cellAddress + ":" + cellEndAddress;
         }
-        return a;
-    }, [sheet, selection]);
+        return cellAddress;
+    }, [sheet, selection, cellAddress, cellEndAddress]);
 
     const filterInfo = filterActive && sheet ? `${viewRows.toLocaleString()} of ${sheet.rows.toLocaleString()} records found` : null;
 
@@ -681,7 +727,10 @@ export function App(): React.ReactElement {
                     }}
                     onClose={() => {
                         setRibbonTab("Home");
-                        void call("close", {});
+                        confirmLeave(async () => {
+                            await call("close", { discard: true });
+                            setWorkbook(null); setState("empty"); setDirty(false);
+                        });
                     }}
                     onBack={() => setRibbonTab("Home")}
                 />

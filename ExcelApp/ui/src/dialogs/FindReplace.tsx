@@ -59,6 +59,7 @@ export default function FindReplace(props: {
     initialTab: "find" | "replace";
     onSelect: (sheet: number, row: number, col: number) => void;
     onClose: () => void;
+    onChanged?: (result: any) => void;
 }) {
     const [tab, setTab] = useState<"find" | "replace">(props.initialTab);
     const [query, setQuery] = useState("");
@@ -70,6 +71,8 @@ export default function FindReplace(props: {
     const [status, setStatus] = useState("");
     const [running, setRunning] = useState(false);
     const cursor = useRef(0);
+    const selected = useRef<Hit | null>(null);
+    const selectHit = (hit: Hit) => { selected.current = hit; props.onSelect(hit[0], hit[1], hit[2]); };
 
     useEffect(() => {
         const offHits = on("findHits", (e: any) => {
@@ -107,21 +110,29 @@ export default function FindReplace(props: {
         }
         const h = hits[cursor.current % hits.length];
         cursor.current = (cursor.current + 1) % hits.length;
-        props.onSelect(h[0], h[1], h[2]);
+        selectHit(h);
     };
 
     const replaceOne = async () => {
         if (!query) return;
-        const h = hits[cursor.current] ?? hits[0];
+        const h = selected.current ?? hits[0];
+        if (!h) { setStatus("Find and select a cell first"); return; }
         const at = h ? [h[1], h[2]] : undefined;
-        const r = await call<{ changed: number; count: number }>("replace", { sheet: scope, query, replacement, all: false, at });
+        const r = await call<{ changed: number; count: number }>("replace", { sheet: h[0], query, replacement, matchCase, all: false, at });
+        props.onChanged?.(r);
         setStatus(`Replaced ${r?.count ?? 0}`);
     };
 
     const replaceAll = async () => {
         if (!query) return;
-        const r = await call<{ changed: number; count: number }>("replace", { sheet: scope, query, replacement, all: true });
-        setStatus(`Replaced ${r?.count ?? 0}`);
+        const book: any = scope < 0 ? await call("workbook") : null;
+        const sheets: number[] = book ? book.sheets.map((s: any) => s.index) : [scope];
+        let total = 0;
+        for (const sheet of sheets) {
+            const result: any = await call("replace", { sheet, query, replacement, matchCase, all: true });
+            total += result.count ?? 0; props.onChanged?.(result);
+        }
+        setStatus(`Replaced ${total}`);
     };
 
     return (
@@ -164,7 +175,7 @@ export default function FindReplace(props: {
                     <div style={hitList}>
                         {hits.length === 0 && <div style={empty}>No results</div>}
                         {hits.map((h, i) => (
-                            <div key={i} style={hitRow} onClick={() => props.onSelect(h[0], h[1], h[2])} title="Go to this cell">
+                            <div key={i} style={hitRow} onClick={() => selectHit(h)} title="Go to this cell">
                                 <span style={hitCell}>{`${colLetter(h[2])}${h[1] + 1}`}</span>
                                 <span style={hitText}>{h[3]}</span>
                             </div>
