@@ -9,3 +9,12 @@ app/
 screenshots/
 # The shortcut holds this PC's paths
 *.lnk
+# The style sidecar and its partial file are as private as the fast copy
+*.xvs
+*.xvs.part
+# The owner's browser experiments (Univer, glide-data-grid): not part of the product
+Browser Excel/
+ExcelApp/ui/node_modules/
+ExcelApp/ui/dist/
+*.log
+ExcelApp/ui/.shots/
