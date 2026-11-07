@@ -21,7 +21,9 @@ public sealed class MainForm : Form
         this.uiFolder = uiFolder ?? FindUi();
         Text = "ExcelApp"; ClientSize = new Size(1400, 860); MinimumSize = new Size(900, 600); AllowDrop = true;
         View.Dock = DockStyle.Fill; View.AllowExternalDrop = false; Controls.Add(View);
-        Session = new Session(); Bridge = new Bridge(Session);
+        Session = new Session();
+        Session.Data = ExcelApp.Data.DataHost.Create((name, payload) => Session.Emit(name, payload)); // plan 4
+        Bridge = new Bridge(Session);
         Session.PickOpenPath = () => OnUi(() =>
         {
             using var d = new OpenFileDialog { Filter = "Excel files|*.xlsx;*.xlsm;*.xlsb;*.xls;*.csv|All files|*.*", Title = "Open" };

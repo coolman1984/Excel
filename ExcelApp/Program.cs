@@ -15,7 +15,8 @@ static class Program
     static int Main(string[] a)
     {
         SetErrorMode(0x8003); // no Windows error box, ever
-        bool unattended = a.Length >= 1 && a[0] is "--build" or "--save" or "--selftest";
+        bool unattended = a.Length >= 1 && a[0] is "--build" or "--save" or "--selftest" or "--export";
+        if (a.Length == 2 && a[0] == "--export") { try { return ExcelApp.Data.ExportChild.Run(a[1]); } catch (Exception e) { Console.WriteLine("ERROR " + e.GetType().Name); return 1; } } // plan 4, lane A
         try
         {
             if (unattended && ((a[0] == "--build" && a.Length != 2) || (a[0] == "--save" && a.Length != 1) || (a[0] == "--selftest" && a.Length != 3))) { Console.WriteLine("ERROR arguments"); return 2; }

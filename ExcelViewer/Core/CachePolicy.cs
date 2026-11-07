@@ -60,6 +60,25 @@ public static class CachePolicy
         dir.SetAccessControl(sec);
     }
 
+    /// <summary>Plan 4: the data store lives in one subfolder of the approved folder (same approval, same lock).</summary>
+    public static string StoreFolder => Path.Combine(Folder, "store");
+    static readonly string[] StoreExtensions = { ".xvt", ".json", ".jsonl", ".xvj" };
+
+    /// <summary>Throws unless this path is a store file under the approved store folder on this laptop.</summary>
+    public static void ValidateStore(string path)
+    {
+        if (!ThisPcApproved) throw new CachePolicyException("The data store is approved for one laptop only, and this is not that laptop.");
+        string full = Path.GetFullPath(path);
+        string root = Path.GetFullPath(StoreFolder) + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new CachePolicyException("Store data may only be written inside the approved store folder.");
+        string name = full.EndsWith(".part", StringComparison.OrdinalIgnoreCase) ? full[..^5] : full;
+        if (!StoreExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
+            throw new CachePolicyException("Only store files may be written to the store folder.");
+        if (new DriveInfo(Path.GetPathRoot(Folder)).DriveType != DriveType.Fixed)
+            throw new CachePolicyException("The approved folder is not on a fixed local disk.");
+    }
+
     public static FileStream OpenForWrite(string path)
     {
         Validate(path); EnsureFolderLocked();

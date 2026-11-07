@@ -24,6 +24,12 @@ static class TestProgram
             Suite("filter", () => FilterTests.Run(Check));
             Suite("save", () => SaveTests.Run(Check, offline));
             Suite("style", () => StyleTests.Run(Check, offline));
+            // plan 4: lane A owns StoreTests/IngestTests, lane B owns QueryTests/AutomationTests/FormulaTests
+            Suite("store", () => StoreTests.Run(Check, offline));
+            Suite("ingest", () => IngestTests.Run(Check, offline));
+            Suite("query", () => QueryTests.Run(Check, offline));
+            Suite("automation", () => AutomationTests.Run(Check, offline));
+            Suite("formula", () => FormulaTests.Run(Check, offline));
         }
         catch (Exception e) { Console.WriteLine("ERROR " + e.GetType().Name); return 1; }
         Console.WriteLine($"ExcelApp tests: {pass} passed, {fail} failed{(offline ? " (offline)" : "")}");

@@ -58,7 +58,7 @@ public sealed class Session : IDisposable
     /// <summary>The window is closing: ask a running read to stop. Its Excel closes itself; it is never killed.</summary>
     public void CancelBuildForClose() { if (opening) child?.CloseInput(); }
 
-    public void Dispose() { memTimer?.Dispose(); watcher?.Dispose(); ReleaseReaders(); DisposeSheets(); }
+    public void Dispose() { Data?.Dispose(); memTimer?.Dispose(); watcher?.Dispose(); ReleaseReaders(); DisposeSheets(); }
 
     // =====================================================================================
     public void Register(Dictionary<string, Func<JsonElement, Task<object?>>> h)
@@ -88,7 +88,11 @@ public sealed class Session : IDisposable
         S("openExternal", _ => { if (path != null) Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", path }, UseShellExecute = false, CreateNoWindow = true }); return new { }; });
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
+        Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }
+
+    /// <summary>Plan 4 data engine; null in tests and the self test.</summary>
+    public Data.DataHost? Data;
 
     // ---- recent files -------------------------------------------------------------------
     string RecentFile => System.IO.Path.Combine(DataDir, "recent.json");
