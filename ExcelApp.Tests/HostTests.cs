@@ -70,6 +70,11 @@ public static class HostTests
     // ---- tests that need no Excel ------------------------------------------------------------
     static void Offline()
     {
+        check("jump: capped samples remain TIMEOUT in percentiles and worst",
+            JumpSamples.Summary(new double?[] { 20, null, 10 }) == "JUMP median 20 ms, p95 TIMEOUT, worst TIMEOUT; TIMEOUT 1/3", "");
+        check("jump: completed samples keep their measured latency",
+            JumpSamples.Summary(new double?[] { 30, 10, 20 }) == "JUMP median 20 ms, p95 30 ms, worst 30 ms; TIMEOUT 0/3", "");
+
         Try("clipboard text splitting", () =>
         {
             var g = Session.SplitClipboard("a\tb\r\nc\t\"x\ty\"\r\n\"say \"\"hi\"\"\"\td\n");

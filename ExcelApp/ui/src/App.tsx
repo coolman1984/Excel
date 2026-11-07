@@ -1,5 +1,6 @@
 import * as React from "react";
 import { call, on as onEvent, isMock } from "./bridge";
+import { PaintSignal } from "./paintSignal";
 import { resolveCommand } from "./keys";
 import { Grid, type GridHandle, type SelRange } from "./grid/Grid";
 import { Ribbon, type TabName } from "./ribbon/Ribbon";
@@ -595,7 +596,7 @@ export function App(): React.ReactElement {
 
     const dispatchRef = React.useRef(dispatch);
     dispatchRef.current = dispatch;
-    const paintRef = React.useRef(0);
+    const paintRef = React.useRef(new PaintSignal());
     const apiRef = React.useRef<any>({});
     apiRef.current = { applyFreeze, setZoomPct, runFilter, runStyle, commitCell };
 
@@ -616,7 +617,7 @@ export function App(): React.ReactElement {
     React.useEffect(() => {
         const host: any = {
             state: () => live.current.state,
-            hasRows: () => !!gridRef.current?.store.getRow(0),
+            hasRows: (row = 0) => !!gridRef.current?.store.getRow(row),
             scrollTo: (v: number) => gridRef.current?.scrollTo(v),
             run: (action: string, ...args: any[]) => {
                 const api = apiRef.current;
@@ -628,7 +629,8 @@ export function App(): React.ReactElement {
                 else if (action === "select") gridRef.current?.setSelection(args[0], args[1], args[2], args[3]);
             },
         };
-        Object.defineProperty(host, "lastPaintMs", { get: () => paintRef.current, configurable: true });
+        Object.defineProperty(host, "lastPaintMs", { get: () => paintRef.current.lastPaintMs, configurable: true });
+        Object.defineProperty(host, "paintToken", { get: () => paintRef.current.token, configurable: true });
         (window as any).__app = host;
         return () => {
             delete (window as any).__app;
@@ -636,7 +638,7 @@ export function App(): React.ReactElement {
     }, []);
 
     const handlePaint = React.useCallback((ms: number) => {
-        paintRef.current = ms;
+        paintRef.current.record(ms);
         setPaintMs(Math.round(ms));
     }, []);
     const onStoreReady = React.useCallback(() => {}, []);

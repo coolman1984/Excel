@@ -128,17 +128,32 @@ static class Program
         await Task.Delay(300); await Shot(f, Path.Combine(folder, "open.png"));
         var wb = (dynamic)f.Session.WorkbookInfo(); int rows = f.Session.Cache!.Sheets.Max(x => x.Rows);
 
-        var rnd = new Random(7); var t = new List<double>();
+        var rnd = new Random(7); var samples = new List<double?>();
         for (int i = 0; i < 10; i++)
         {
             int row = rnd.Next(0, Math.Max(1, rows - 40));
-            string before = await Js(f, "String(window.__app.lastPaintMs)"); var s2 = Stopwatch.StartNew();
+            // Duration is not an identity: distinct paints can have exactly equal timings.
+            // Capture the completion token before triggering even an already-cached jump.
+            string before = await Js(f, "String(window.__app.paintToken)");
+            var jump = Stopwatch.StartNew();
             await Js(f, $"window.__app.scrollTo({row}); 'x'");
-            // The UI sets lastPaintMs when the jump has been painted with its data.
-            while (s2.Elapsed.TotalSeconds < 5 && await Js(f, "String(window.__app.lastPaintMs)") == before) await Task.Delay(2);
-            t.Add(s2.Elapsed.TotalMilliseconds);
+            double? elapsed = null;
+            string after = before;
+            while (jump.Elapsed.TotalSeconds < 5)
+            {
+                after = await Js(f, "String(window.__app.paintToken)");
+                if (after != before && jump.Elapsed.TotalSeconds < 5)
+                {
+                    elapsed = jump.Elapsed.TotalMilliseconds;
+                    break;
+                }
+                await Task.Delay(2);
+            }
+            samples.Add(elapsed);
+            string loaded = await Js(f, $"String(window.__app.hasRows({row}))");
+            Console.WriteLine($"JUMP PROBE {i + 1} row {row} token {before}->{after} loaded {loaded}: {JumpSamples.Format(elapsed)}");
         }
-        t.Sort(); Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"JUMP median {t[t.Count / 2]:F0} ms, p95 {t[(int)(t.Count * 0.95)]:F0} ms, worst {t[^1]:F0} ms"));
+        Console.WriteLine(JumpSamples.Summary(samples));
         proc.Refresh(); Console.WriteLine($"MEMORY host {proc.PrivateMemorySize64 / 1048576} MB");
         Console.WriteLine($"MEMORY webview {WebViewMB(f)} MB");
 
