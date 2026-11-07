@@ -1,5 +1,9 @@
 # History
 
+## 2026-11-07
+
+- **The editor, planned:** the owner approved option A, a desktop app with a C# host and a WebView2 interface that looks like Excel, reads through Excel COM into the existing fast copy, filters and edits on the copy, and saves through Excel so files stay NASCA-protected. The complete one-shot build plan for an implementing agent is `docs\PLAN-3-EXCELAPP.md`. Nothing was built yet.
+
 ## 2026-11-04
 
 - **First thinking:** measured Excel COM on protected files. Reading one screen takes about 2 ms at any size; opening is the slow part. Rust cannot link on this PC, and C# builds with nothing to install. See `docs\DECISION-1.md`.
