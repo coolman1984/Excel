@@ -1,0 +1,26 @@
+using System.Security.Cryptography;
+using System.Text;
+namespace ExcelApp.Data;
+public sealed class Workspace
+{
+    readonly StoreRoot root; readonly Catalog catalog; readonly IRawSource source; readonly WorkQueue queue; readonly Action<string,object?> emit;
+    public Workspace(StoreRoot root,Catalog catalog,IRawSource source,WorkQueue queue,Action<string,object?> emit) {this.root=root;this.catalog=catalog;this.source=source;this.queue=queue;this.emit=emit;}
+    public IReadOnlyList<object> Projects() {var state=catalog.Snapshot();return state.Projects.Select(p=>(object)new {id=p.Key,name=p.Value,tables=state.Workspace.Where(x=>x.Source.GroupId==p.Key).Select(x=>x.Info).ToArray()}).ToArray();}
+    public string Create(string name) {if(string.IsNullOrWhiteSpace(name))throw new UserError("Enter a project name.");string id=Guid.NewGuid().ToString("N");catalog.Update(c=>{c.Projects[id]=name.Trim();return 0;});return id;}
+    public void Rename(string id,string name) {if(string.IsNullOrWhiteSpace(name))throw new UserError("Enter a project name.");catalog.Update(c=>{if(!c.Projects.ContainsKey(id))throw new UserError("The project was not found.");c.Projects[id]=name.Trim();c.Workspace=c.Workspace.Select(x=>x.Source.GroupId==id?x with {Info=x.Info with {Group=name.Trim()}}:x).ToList();return 0;});}
+    public void Delete(string id) {var removed=catalog.Update(c=>{var entries=c.Workspace.Where(x=>x.Source.GroupId==id).ToArray();c.Projects.Remove(id);c.Workspace.RemoveAll(x=>x.Source.GroupId==id);return entries;});foreach(var e in removed){root.Delete(e.RelativePath);root.Delete(e.RelativePath.Replace(".xvt",".raw.xvt"));}}
+    public void Remove(string project,string id) {var entry=catalog.Update(c=>{var found=c.Workspace.FirstOrDefault(x=>x.Source.GroupId==project && x.Info.Id==id);if(found!=null)c.Workspace.Remove(found);return found;});if(entry!=null){root.Delete(entry.RelativePath);root.Delete(entry.RelativePath.Replace(".xvt",".raw.xvt"));}}
+    public void Add(string project,string path) {if(!catalog.Snapshot().Projects.ContainsKey(project))throw new UserError("The project was not found.");queue.Enqueue("workspace",token=>{Read(project,path,token);return Task.CompletedTask;});}
+    public void Refresh(string project) {var state=catalog.Snapshot();if(!state.Projects.ContainsKey(project))throw new UserError("The project was not found.");foreach(var group in state.Workspace.Where(x=>x.Source.GroupId==project).GroupBy(x=>x.Source.SourcePath,StringComparer.OrdinalIgnoreCase)) {var info=new FileInfo(group.Key);if(info.Exists && group.Any(x=>x.SourceLength!=info.Length || x.SourceTicks!=info.LastWriteTimeUtc.Ticks)) Add(project,group.Key);}}
+    static string Id(string project,string path,string sheet) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(project+"\n"+path.ToUpperInvariant()+"\n"+sheet.ToUpperInvariant())))[..24].ToLowerInvariant();
+    void Read(string project,string path,CancellationToken token) {
+        catalog.Update(c=>{c.Workspace=c.Workspace.Select(x=>x.Source.GroupId==project && string.Equals(x.Source.SourcePath,path,StringComparison.OrdinalIgnoreCase)?x with {Info=x.Info with {Group=c.Projects[project]+" (refreshing)"}}:x).ToList();return 0;});
+        try {var info=new FileInfo(path);long length=info.Length,ticks=info.LastWriteTimeUtc.Ticks;var sheets=source.ReadSheets(path,token);foreach(var sheet in sheets) {token.ThrowIfCancellationRequested();if(sheet.Rows==0 || sheet.Cols==0 || !Enumerable.Range(0,sheet.Rows).Any(r=>Enumerable.Range(0,sheet.Cols).Any(c=>sheet.Text(r,c).Length>0)))continue;
+                var typed=Typing.Type(sheet,sheet.FirstRow,Array.Empty<TypeFix>());int version=catalog.NextVersion();string id=Id(project,path,sheet.Name);string relative=$"tables/{project}/{id}.xvt";var cols=typed.Table.Columns.ToList();cols.Add(new NumberColumn("_v",Enumerable.Repeat((double)version,typed.Table.Rows).ToArray(),null));
+                TableFile.Write(root,relative,new Table(typed.Table.Name,cols),new Dictionary<string,string>());TableFile.Write(root,$"tables/{project}/{id}.raw.xvt",typed.Raw,new Dictionary<string,string>());
+                var map=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);for(int c=0;c<sheet.Cols;c++) {string header=sheet.Text(0,c).Trim();if(header.Length==0) header="Column "+(c+1);map.TryAdd(header,c+sheet.FirstCol);}var sourceInfo=new SourceInfo(version,"table",project,"",0,path,sheet.Name,sheet.FirstRow,DateTime.Now,"",map);
+                catalog.Update(c=>{if(!c.Projects.TryGetValue(project,out var projectName))return 0;var tableInfo=new TableInfo("table",id,Path.GetFileNameWithoutExtension(path)+" / "+sheet.Name,projectName,typed.Table.Rows,cols.Where(x=>!x.Name.StartsWith('_')).Select(x=>new ColumnInfo(x.Name,x.Type)).ToArray(),DateTime.Now);c.Workspace.RemoveAll(x=>x.Info.Id==id);c.Workspace.Add(new WorkspaceEntry(tableInfo,relative,sourceInfo,length,ticks));return 0;});
+            } emit("data.notice",new {message="Workspace data updated."});
+        } finally {catalog.Update(c=>{if(c.Projects.TryGetValue(project,out var name))c.Workspace=c.Workspace.Select(x=>x.Source.GroupId==project && string.Equals(x.Source.SourcePath,path,StringComparison.OrdinalIgnoreCase)?x with {Info=x.Info with {Group=name}}:x).ToList();return 0;});}
+    }
+}
