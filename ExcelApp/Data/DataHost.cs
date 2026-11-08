@@ -33,5 +33,12 @@ public sealed class DataHost : IDisposable
         Services.Ingestion?.Start();
     }
 
-    public void Dispose() { try { Services?.Ingestion?.Stop(); } catch (Exception) { } }
+    public void Dispose()
+    {
+        try { Services?.Ingestion?.Stop(); } catch (Exception e) { Log.Write("ingestion stop " + e.GetType().Name); }
+        if (Services == null) return;
+        for (int i = Services.Owned.Count - 1; i >= 0; i--)
+            try { Services.Owned[i].Dispose(); } catch (Exception e) { Log.Write("dispose " + e.GetType().Name); }
+        Services.Owned.Clear();
+    }
 }

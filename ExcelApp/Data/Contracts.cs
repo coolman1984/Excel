@@ -309,6 +309,9 @@ public sealed class DataServices
     public IExporter Exporter { get; set; } = null!;             // lane A sets
     public ResultStore Results { get; } = new();
     public Settings Settings { get; set; } = new();
+    /// <summary>Services with timers or subscriptions (alerts, scheduler, watchers) add themselves here; DataHost.Dispose
+    /// disposes them in reverse order, after stopping ingestion.</summary>
+    public List<IDisposable> Owned { get; } = new();
 }
 
 public sealed class Settings
