@@ -1,4 +1,5 @@
 import * as React from "react";
+import { DataApp } from "./data/DataApp";
 import { call, on as onEvent, isMock } from "./bridge";
 import { PaintSignal } from "./paintSignal";
 import { resolveCommand } from "./keys";
@@ -33,6 +34,7 @@ function lettersFromCol(n: number): string {
 }
 
 export function App(): React.ReactElement {
+    const [mode, setMode] = React.useState<"editor" | "data">(() => new URLSearchParams(window.location.search).get("mode") === "data" ? "data" : "editor");
     const [state, setState] = React.useState<AppState>("empty");
     const [opening, setOpening] = React.useState<{ phase: string; percent: number }>({ phase: "Opening", percent: 0 });
     const [workbook, setWorkbook] = React.useState<WorkbookInfo | null>(null);
@@ -70,7 +72,7 @@ export function App(): React.ReactElement {
 
     // Keep the latest values for the window.__app self-test hooks.
     const live = React.useRef<any>({});
-    live.current = { state, selection, sheetIndex, sheet, zoom, freeze, viewRows, filterActive, dirty, fileName: workbook?.name, workbook };
+    live.current = { mode, state, selection, sheetIndex, sheet, zoom, freeze, viewRows, filterActive, dirty, fileName: workbook?.name, workbook };
 
     const loadSheet = React.useCallback(async (index: number) => {
         setStatus("Reading...");
@@ -602,7 +604,7 @@ export function App(): React.ReactElement {
 
     React.useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if (live.current.state !== "ready") return;
+            if (live.current.mode !== "editor" || live.current.state !== "ready") return;
             const tag = (e.target as HTMLElement)?.tagName;
             const inField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
             const cmd = resolveCommand(e);
@@ -660,8 +662,13 @@ export function App(): React.ReactElement {
                     {"\u25A6"}
                 </span>
                 <span className="fileName">{workbook ? workbook.name + (dirty ? " *" : "") : "ExcelApp"}</span>
+                <div className="mode-switch" role="group" aria-label="Application mode">
+                    <button type="button" className={mode === "editor" ? "active" : ""} aria-pressed={mode === "editor"} onClick={() => setMode("editor")}>Editor</button>
+                    <button type="button" className={mode === "data" ? "active" : ""} aria-pressed={mode === "data"} onClick={() => setMode("data")}>Data</button>
+                </div>
                 <span className="autoSavePill">AutoSave Off</span>
             </div>
+            <div style={{ display: mode === "editor" ? "contents" : "none" }}>
             <Ribbon
                 activeTab={ribbonTab}
                 onTab={(t) => setRibbonTab(t)}
@@ -803,6 +810,8 @@ export function App(): React.ReactElement {
                 </div>
             )}
 
+            </div>
+            {mode === "data" && <DataApp />}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>
