@@ -23,6 +23,7 @@ public sealed class MainForm : Form
         View.Dock = DockStyle.Fill; View.AllowExternalDrop = false; Controls.Add(View);
         Session = new Session();
         Session.Data = ExcelApp.Data.DataHost.Create((name, payload) => Session.Emit(name, payload)); // plan 4
+        if (Session.Data.Services != null) Session.Journal = new EditJournal(Session.Data.Services.Store); // auto-save journal in the store
         Bridge = new Bridge(Session);
         Session.PickOpenPath = () => OnUi(() =>
         {

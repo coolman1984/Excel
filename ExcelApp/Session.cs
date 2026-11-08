@@ -58,7 +58,7 @@ public sealed class Session : IDisposable
     /// <summary>The window is closing: ask a running read to stop. Its Excel closes itself; it is never killed.</summary>
     public void CancelBuildForClose() { if (opening) child?.CloseInput(); }
 
-    public void Dispose() { Data?.Dispose(); memTimer?.Dispose(); watcher?.Dispose(); ReleaseReaders(); DisposeSheets(); }
+    public void Dispose() { Journal?.Dispose(); Data?.Dispose(); memTimer?.Dispose(); watcher?.Dispose(); ReleaseReaders(); DisposeSheets(); }
 
     // =====================================================================================
     public void Register(Dictionary<string, Func<JsonElement, Task<object?>>> h)
@@ -85,6 +85,7 @@ public sealed class Session : IDisposable
         S("close", a => { if (Dirty && !Arg.Bool(a, "discard")) throw new UserError("Save or discard your changes before closing."); CloseWorkbook(); return new { }; });
         S("closeAnswer", a => { CloseAnswer?.Invoke(Arg.Str(a, "action") ?? "cancel"); return new { }; });
         S("recent", _ => new { recent = Recent() });
+        S("recovery", _ => RecoveryInfo()); S("recoverEdits", _ => RecoverEdits()); S("discardRecovery", _ => DiscardRecovery());
         S("openExternal", _ => { if (path != null) Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", path }, UseShellExecute = false, CreateNoWindow = true }); return new { }; });
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
@@ -120,6 +121,8 @@ public sealed class Session : IDisposable
         if (Dirty && !discard) throw new UserError("Save or discard your changes before opening another file.");
         if (!File.Exists(file)) throw new UserError("That file was not found.");
         if (!OpenExt.Contains(System.IO.Path.GetExtension(file).ToLowerInvariant())) throw new UserError("This kind of file cannot be opened. Choose an Excel file.");
+        if (discard && path != null && recovery == null) Journal?.Forget(path);   // the user threw these edits away
+        recovery = null;
         opening = true;
         Task.Run(() => OpenCore(System.IO.Path.GetFullPath(file)));
     }
@@ -157,6 +160,7 @@ public sealed class Session : IDisposable
             Log.Write($"opened sheets={cache!.Sheets.Count} cells={cache.Sheets.Sum(s => s.Cells)} {sw.ElapsedMilliseconds} ms");
             opening = false;
             Emit("opened", new { Workbook = WorkbookInfo() });
+            FindRecovery(file);
         }
         catch (InvalidDataException) { OpenFailed("The fast copy could not be read."); }
         catch (CachePolicyException e) { OpenFailed(e.Message); }
@@ -254,6 +258,8 @@ public sealed class Session : IDisposable
         if (Busy) throw new UserError("Please wait until the current work is finished.");
         findCts?.Cancel();
         ReleaseReaders(); DisposeSheets(); watcher?.Dispose(); watcher = null;
+        if (path != null && recovery == null) Journal?.Forget(path);   // closing means saved or discarded; a waiting recovery stays for next time
+        recovery = null;
         cache = null; path = null; cells = null; sidecar = null; lock (editLock) Edits.Clear();
         TitleChanged?.Invoke("", false);
     }
@@ -385,7 +391,43 @@ public sealed class Session : IDisposable
     // =====================================================================================
     // Editing
     // =====================================================================================
-    void Dirtied() => TitleChanged?.Invoke(FileName, Dirty);
+    void Dirtied() { TitleChanged?.Invoke(FileName, Dirty); ScheduleJournal(); }
+
+    // ---- auto-save journal (EditJournal) -------------------------------------------------
+    /// <summary>Set by the window when the store is available; null means no journal (tests, or not the approved laptop).</summary>
+    public EditJournal? Journal;
+    EditJournal.Snapshot? recovery;   // unsaved edits found when the file was opened, waiting for the user's answer
+
+    void ScheduleJournal()
+    {
+        var j = Journal; string? p = path;
+        if (j == null || p == null || recovery != null) return;   // while a recovery waits, the old journal must not be overwritten
+        j.Schedule(() => { lock (editLock) return string.Equals(path, p, StringComparison.OrdinalIgnoreCase) ? EditJournal.Take(p, Edits) : null; });
+    }
+
+    void FindRecovery(string file)
+    {
+        recovery = Journal?.Find(file);
+        if (recovery != null) Emit("recovery", RecoveryInfo());
+    }
+
+    object RecoveryInfo() => recovery == null ? new { available = false } :
+        new { available = true, cells = recovery.Cells.Count, savedAt = recovery.SavedAt.ToString("yyyy-MM-dd HH:mm"), sameFile = EditJournal.SameFile(recovery) };
+
+    object RecoverEdits()
+    {
+        var c = Need(); var r = recovery ?? throw new UserError("There are no unsaved changes to restore.");
+        int n; lock (editLock) n = EditJournal.Restore(r, Edits, s => s >= 0 && s < c.Sheets.Count ? (c.Sheets[s].Rows, c.Sheets[s].Cols) : (-1, -1));
+        recovery = null;
+        Dirtied();
+        return new { restored = n, dirty = Dirty, canUndo = Edits.CanUndo };
+    }
+
+    object DiscardRecovery()
+    {
+        if (recovery != null) { Journal?.Forget(recovery.File); recovery = null; }
+        return new { };
+    }
 
     // View-space rectangles clamped to the sheet, as a flat list.
     List<(int R, int C)> Expand(CacheData c, SheetState st, int sheet, List<(int R1, int C1, int R2, int C2)> ranges)
@@ -882,6 +924,7 @@ public sealed class Session : IDisposable
             int code = await WaitChild(ch, true); child = null;
             if (code == 0)
             {
+                Journal?.Forget(source); recovery = null;
                 LoadCache(target, CachePolicy.PathFor(target), keepSheet); AddRecent(target);
                 Log.Write($"saved edits ok {sw.ElapsedMilliseconds} ms");
                 Emit("saved", new { Path = target, Seconds = Math.Round(sw.Elapsed.TotalSeconds, 1) });
@@ -891,6 +934,7 @@ public sealed class Session : IDisposable
             if (sawSaved)
             {
                 // The file is saved but the read-back failed: the edits are in the file now.
+                Journal?.Forget(source); recovery = null;
                 lock (editLock) Edits.Clear(); path = target;
                 Emit("saved", new { Path = target, Seconds = Math.Round(sw.Elapsed.TotalSeconds, 1) });
                 opening = true; _ = Task.Run(() => OpenCore(target));
