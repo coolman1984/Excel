@@ -38,6 +38,24 @@ Every file the three lanes own (plan section 3) and their tests. Not: `Contracts
 6. **Speed**: re-run the speed lines; all targets of plan section 6 must print and hold.
 7. **Interface against the contract**: `mockData.ts` returns the same shapes as the host.
 
+## Leads from the lead's verification (2026-11-08), check these besides the order above
+Baseline on main (lead, live): viewer 439 passed; ExcelApp 610 passed; tsc 0; vitest 40/40; build.ps1 OK.
+1. **Formula engine (lane B) is under-proven.** The live 60-formula comparison (`FormulaTests.Live`) uses only 12
+   arithmetic patterns. Widen it to every function of the plan's list (text, dates on the 1900 system incl. the
+   1900-02-29 quirk, lookups incl. XLOOKUP match/search modes, IF/IFERROR, error values #DIV/0! #N/A #VALUE! #REF!,
+   empty-cell semantics, text-number coercion). Absolute references (`$A$1`) are parsed but dropped from the AST: keep
+   them. XLOOKUP binary search modes are rejected: implement or return a plain-sentence error. Write each live case so
+   it runs when `offline == false` (the lead runs it) and the offline case list grows to the plan's 150+ real cases.
+2. **Sandbox storage** keeps edited columns in store JSON; the plan wants `TableFile` (`.xvt`). Move it.
+3. **Recipe run status** is not persisted by the host, so the Recipes page shows "Status unavailable" until an event.
+   Persist the last run (time, ok, message) in the recipe's config and return it from the recipe list.
+4. **xvt write 10M x 10** varied 1.4 to 9.2 s across runs against the 10 s target; find the variance (GC, buffer size,
+   disk flush) and make it hold with margin.
+5. **Lane A live tests** are written in a dense one-line style; make them readable without changing what they prove.
+6. **Lane B's request** to add `history` to the wire `QuerySpec` is declined: questions use the history commands.
+7. **Interface**: the Ingestion page scrolls the whole shell (top bar cut off); "Last load" shows a raw ISO time
+   (format it like the other pages); the main bundle is 680 kB (lazy-load the Data mode).
+
 ## How to fix
 Test first: write the failing test, see it fail, fix, see it pass. Keep fixes small and in the owning file.
 Checks you can run in the sandbox: `powershell -NoProfile -File check.ps1 -Offline -Suites store,ingest,query,automation,formula,journal`;
