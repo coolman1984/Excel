@@ -1,3 +1,4 @@
+import { mockDataCall, mockDataOn } from "./data/mockData";
 import type { CellData, CellStyle, Condition, SortKey, Stats, WorkbookInfo } from "./types";
 
 // A made-up host so the UI can be built and driven in a plain browser (Chrome)
@@ -113,6 +114,7 @@ export class MockHost {
     private viewCache: { sheet: number; map: number[] | null; active: boolean } | null = null;
 
     on(event: string, handler: (e: any) => void): () => void {
+        if (event.startsWith("data.")) return mockDataOn(event, handler);
         let set = this.listeners.get(event);
         if (!set) {
             set = new Set();
@@ -318,6 +320,7 @@ export class MockHost {
     }
 
     async call(cmd: string, args: any = {}): Promise<any> {
+        if (cmd.startsWith("data.")) return mockDataCall(cmd, args);
         switch (cmd) {
             case "ready":
                 return { version: "mock-1", recent: [], approved: true };
