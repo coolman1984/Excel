@@ -37,3 +37,11 @@ after two tries; then write the exact error in your answer and continue with the
 Real data never leaves the store; Excel is the only reader of company files; never open `D:\ExcelViewerCache` or any `.xvc`;
 made-up data only; no logging of cell values or names; no git, no other agents, no agent_bridge; own only your files.
 Work through **every** step of your lane in order, checking after each one. Do not stop to ask.
+
+## Contract changes decided by the lead (2026-11-08, after lane C's requests)
+1. `DiffResult` now extends `ResultInfo`: `data.history.diff` and `data.sandbox.compare` return `resultId, rows, columns, ms`
+   plus `added, removed, changed, changedColumns`. Lane A (history diff) and lane B (sandbox compare) return that shape.
+2. `_status` is the one reserved column that is sent: listed in `ResultInfo.columns` of diff results and paged by
+   `data.page` (lane B Format). `_v` and `_r` stay private.
+3. `data.settings.get` / `.set` return `SettingsInfo { settings, storeFolder, configFolder, pdfApproved }` (lane A).
+   `pdfApproved` is false until the owner confirms (plan 7.4); the interface shows AllowPdf disabled while it is false.

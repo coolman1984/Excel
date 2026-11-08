@@ -10,7 +10,7 @@ export interface TableInfo { kind: TableRef["kind"]; id: string; name: string; g
 
 /** A page of rows from a result (data.page). Cell text is already formatted for display. */
 export interface ResultPage { resultId: string; from: number; rows: string[][]; kinds: number[][] }
-/** A query result handle (data.run). Columns exclude the reserved "_" lineage columns. */
+/** A query result handle (data.run). Columns exclude the reserved "_" columns, except "_status" (added|removed|changed|same) of diff results, kept for row colouring. */
 export interface ResultInfo { resultId: string; rows: number; columns: ColumnInfo[]; ms: number; groups?: boolean }
 
 // ---- Query spec (lane B executes; the interface builds it) ----
@@ -58,7 +58,11 @@ export interface LoadRecord {
     versions: Record<string, number>; cleanup?: { items: CleanupItem[] }; quality?: { flags: QualityFlag[] };
 }
 export interface VersionInfo { reportTypeId: string; period: string; version: number; loadId: string; loadedAt: string; rows: number; added: number; removed: number; changed: number; current: boolean; locked: boolean; postClose: boolean; note: string }
-export interface DiffResult { resultId: string; added: number; removed: number; changed: number; changedColumns: Record<string, number> }
+/** data.history.diff and data.sandbox.compare: a ResultInfo (page it with data.page) plus the counts. Rows carry "_status". */
+export interface DiffResult extends ResultInfo { added: number; removed: number; changed: number; changedColumns: Record<string, number> }
+/** data.settings.get answers SettingsInfo; data.settings.set takes { settings } and answers SettingsInfo. */
+export interface Settings { allowPdf: boolean; startWithWindows: boolean; maxParallelExcel: number }
+export interface SettingsInfo { settings: Settings; storeFolder: string; configFolder: string; pdfApproved: boolean }   // pdfApproved: security sign-off, false until the owner confirms (plan 7.4)
 
 // ---- Saved objects (configuration; lane B) ----
 export interface SavedView { id: string; name: string; spec: QuerySpec; exception: boolean; folder: string }

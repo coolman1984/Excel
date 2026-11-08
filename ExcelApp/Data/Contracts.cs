@@ -89,7 +89,8 @@ public sealed class BoolColumn : Column
 /// An immutable table. Reserved lineage columns (plan 4 section 2.6), present on every loaded table:
 ///   "_v"  Number: the version number the row came from
 ///   "_r"  Number: the 1-based row number in the source sheet
-/// Names starting with "_" are hidden in the interface and never typed or cleaned.
+/// Names starting with "_" are hidden in the interface and never typed or cleaned. One exception: "_status" of a diff
+/// result (added|removed|changed|same) IS sent by data.page and listed in ResultInfo.columns, for row colouring.
 /// </summary>
 public sealed class Table
 {
