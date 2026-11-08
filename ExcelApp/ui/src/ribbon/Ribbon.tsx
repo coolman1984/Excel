@@ -321,6 +321,8 @@ function HomeTab(p: RibbonProps): React.ReactElement {
                             </div>
                         )}
                     </Menu>
+                </div>
+                <div className="rcol">
                     <Menu label="Sort & Filter" testid="menu-sortfilter">
                         {(close) => (
                             <div className="menuList">

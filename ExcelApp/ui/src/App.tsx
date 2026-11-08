@@ -54,6 +54,7 @@ export function App(): React.ReactElement {
     const [formulaBarVisible, setFormulaBarVisible] = React.useState(true);
     const [freeze, setFreeze] = React.useState({ rows: 0, cols: 0 });
     const [status, setStatus] = React.useState("Ready");
+    const [recovery, setRecovery] = React.useState<{ cells: number; savedAt: string; sameFile: boolean } | null>(null);
     const [stats, setStats] = React.useState<Stats | null>(null);
     const [ribbonTab, setRibbonTab] = React.useState<TabName>("Home");
     const [ribbonCollapsed, setRibbonCollapsed] = React.useState(false);
@@ -93,6 +94,7 @@ export function App(): React.ReactElement {
         offs.push(
             onEvent("opening", (e) => {
                 setState("opening");
+                setRecovery(null);
                 setOpening({ phase: e.phase, percent: e.percent });
                 setStatus(e.phase + "...");
             })
@@ -123,6 +125,7 @@ export function App(): React.ReactElement {
                 }).catch(() => {});
             })
         );
+        offs.push(onEvent("recovery", (e) => setRecovery(e?.available ? { cells: e.cells ?? 0, savedAt: e.savedAt ?? "", sameFile: !!e.sameFile } : null)));
         offs.push(onEvent("openFailed", (e) => {
             setState("empty");
             setStatus("Could not open the file: " + (e.error ?? ""));
@@ -745,6 +748,22 @@ export function App(): React.ReactElement {
                 />
             ) : state === "ready" && sheet ? (
                 <>
+                    {recovery && (
+                        <div className="recovery-bar" role="alert">
+                            <span>
+                                {recovery.cells} unsaved change{recovery.cells === 1 ? "" : "s"} from {recovery.savedAt} can be restored.
+                                {!recovery.sameFile && " The file changed on disk since then; check the restored cells."}
+                            </span>
+                            <button onClick={async () => {
+                                try {
+                                    const r: any = await call("recoverEdits");
+                                    setRecovery(null); setDirty(!!r.dirty); refreshView();
+                                    setStatus(r.restored + " change" + (r.restored === 1 ? "" : "s") + " restored");
+                                } catch (err: any) { setRecovery(null); setStatus(String(err?.message ?? err)); }
+                            }}>Restore</button>
+                            <button onClick={async () => { await call("discardRecovery").catch(() => {}); setRecovery(null); }}>Discard</button>
+                        </div>
+                    )}
                     <FormulaBar
                         address={displayAddress}
                         raw={cellRaw}

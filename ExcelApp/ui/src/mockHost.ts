@@ -354,6 +354,10 @@ export class MockHost {
                 return this.clearCells(args);
             case "setStyle":
                 return this.setStyle(args);
+            case "recoverEdits":
+                return { restored: 3, dirty: true, canUndo: true };
+            case "discardRecovery":
+                return {};
             case "undo":
                 return this.undo();
             case "redo":
@@ -421,6 +425,8 @@ export class MockHost {
         this.current = 0;
         this.invalidateView();
         this.emit("opened", { workbook: this.workbook() });
+        if (new URLSearchParams(globalThis.location?.search ?? "").get("recovery") === "1")
+            this.emit("recovery", { available: true, cells: 3, savedAt: "2026-11-08 09:15", sameFile: true });
     }
 
     private delay(ms: number): Promise<void> {
