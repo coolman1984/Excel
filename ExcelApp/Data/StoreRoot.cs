@@ -84,6 +84,33 @@ public sealed class StoreRoot : FileRoot
     protected override void Check(string fullPath) { if (!IsTest) CachePolicy.ValidateStore(fullPath); }
 }
 
+/// <summary>A library file (.exlib) at a path the user chose (save or open dialog). Configuration only: the library test
+/// proves no table data is inside. The only lane-facing way to touch a file outside the two roots.</summary>
+public static class ExternalLibrary
+{
+    static string Checked(string fullPath)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath) || !Path.IsPathRooted(fullPath)) throw new UserError("Choose a full path for the library file.");
+        string f = Path.GetFullPath(fullPath);
+        if (!f.EndsWith(".exlib", StringComparison.OrdinalIgnoreCase)) throw new UserError("A library file must end with .exlib.");
+        if (f.StartsWith(CachePolicy.StoreFolder, StringComparison.OrdinalIgnoreCase)) throw new UserError("A library file cannot be saved in the data store.");
+        return f;
+    }
+    /// <summary>Writes atomically (part file, then move).</summary>
+    public static void Write(string fullPath, string text)
+    {
+        string f = Checked(fullPath); Directory.CreateDirectory(Path.GetDirectoryName(f)!);
+        File.WriteAllText(f + ".part", text, new System.Text.UTF8Encoding(false)); File.Move(f + ".part", f, true);
+    }
+    public static string Read(string fullPath)
+    {
+        string f = Checked(fullPath);
+        if (!File.Exists(f)) throw new UserError("That library file was not found.");
+        if (new FileInfo(f).Length > 20L << 20) throw new UserError("That library file is too large.");
+        return File.ReadAllText(f);
+    }
+}
+
 /// <summary>Configuration only (recipes, views, dashboards, alerts, schedules, settings): %APPDATA%\ExcelApp\config.</summary>
 public sealed class ConfigRoot : FileRoot
 {

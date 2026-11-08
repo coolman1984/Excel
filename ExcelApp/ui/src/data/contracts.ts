@@ -69,7 +69,9 @@ export interface SavedView { id: string; name: string; spec: QuerySpec; exceptio
 export interface Link { id: string; name: string; left: TableRef; right: TableRef; on: { left: string; right: string }[]; compare: { left: string; right: string; as: string }[]; fuzzy: "none" | "normalized" | "similar" }
 export interface AlertRule { id: string; name: string; viewId?: string; spec?: QuerySpec; measure: string; op: "gt" | "ge" | "lt" | "le" | "eq" | "ne" | "changePct"; value: number; reportTypes: string[]; enabled: boolean }
 export interface AlertEvent { id: string; ruleId: string; name: string; at: string; value: number; message: string }
-export interface RecipeStep { kind: "query" | "export" | "pack"; spec?: QuerySpec; viewId?: string; export?: { target: string; template?: string; sheet: string; startCell: string } }
+export interface PackSheet { spec?: QuerySpec; viewId?: string; sheet: string; startCell: string }
+/** kind "pack": "sheets" lists the sheets of one workbook and "export" gives its target and template (export.sheet/startCell unused). */
+export interface RecipeStep { kind: "query" | "export" | "pack"; spec?: QuerySpec; viewId?: string; export?: { target: string; template?: string; sheet: string; startCell: string }; sheets?: PackSheet[] }
 export interface ReportRecipe { id: string; name: string; steps: RecipeStep[]; schedule?: { kind: "daily" | "weekly" | "monthly" | "afterLoad"; time?: string; day?: number; reportType?: string }; enabled: boolean }
 export interface Tile { id: string; title: string; spec: QuerySpec; measure: string; format: string; compareTo?: "previousPeriod" | "previousVersion" }
 export interface Dashboard { id: string; name: string; tiles: Tile[] }
