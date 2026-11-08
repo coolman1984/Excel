@@ -17,6 +17,8 @@ static class TestProgram
     {
         SetErrorMode(0x8003); // no Windows error box, ever
         bool offline = a.Contains("offline");
+        var only = a.FirstOrDefault(x => x.StartsWith("--suites="))?.Substring(9).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Selected = only is { Length: > 0 } ? new HashSet<string>(only, StringComparer.OrdinalIgnoreCase) : null;
         try
         {
             Suite("host", () => HostTests.Run(Check, offline));
@@ -36,8 +38,11 @@ static class TestProgram
         return fail == 0 ? 0 : 1;
     }
 
+    static HashSet<string>? Selected;   // null = every suite; "--suites=store,ingest" = only those
+
     static void Suite(string name, Action run)
     {
+        if (Selected != null && !Selected.Contains(name)) return;
         try { run(); }
         catch (Exception e) { Check(name + " suite ran to the end", false, e.GetType().Name); }
     }
