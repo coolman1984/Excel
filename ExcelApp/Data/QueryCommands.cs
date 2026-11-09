@@ -19,15 +19,7 @@ public static class QueryCommands
         static T Read<T>(JsonElement a, string name) => JsonSerializer.Deserialize<T>(a.GetProperty(name), Json.Options)!;
         h["data.page"] = a => Task.FromResult<object?>(Format.Page(s.Results, a.GetProperty("resultId").GetString()!, a.GetProperty("from").GetInt32(), a.GetProperty("count").GetInt32()));
         h["data.release"] = a => { s.Results.Release(a.GetProperty("resultId").GetString()!); return Task.FromResult<object?>(new { }); };
-        h["data.run"] = async a =>
-        {
-            var spec = Read<QuerySpec>(a, "spec"); if (spec.History == null) return await Task.Run<object?>(() => Drill.Run(spec, s));
-            if (!h.TryGetValue("data.history.versions", out var versionsHandler) || !h.TryGetValue("data.history.diff", out var diffHandler)) throw new UserError("Report history is unavailable.");
-            var history = spec.History; var request = JsonSerializer.SerializeToElement(new { reportTypeId = history.ReportTypeId, period = history.Period }, Json.Options);
-            object? response = await versionsHandler(request); var json = JsonSerializer.SerializeToElement(response, Json.Options); var versions = json.GetProperty("versions").EnumerateArray().Where(v => (!v.TryGetProperty("period", out var p) || p.GetString() == history.Period) && (!v.TryGetProperty("status", out var status) || !string.Equals(status.GetString(), "rolledBack", StringComparison.OrdinalIgnoreCase))).Select(v => v.GetProperty("version").GetInt32()).Distinct().Order().ToArray();
-            if (versions.Length < 2) throw new UserError("That period needs at least two versions to compare.");
-            return await diffHandler(JsonSerializer.SerializeToElement(new { reportTypeId = history.ReportTypeId, period = history.Period, from = versions[^2], to = versions[^1] }, Json.Options));
-        };
+        h["data.run"] = a => Task.Run<object?>(() => Drill.Run(Read<QuerySpec>(a, "spec"), s));
         h["data.drill"] = a => Task.Run<object?>(() => Drill.Open(s, a.GetProperty("resultId").GetString()!, a.GetProperty("row").GetInt32()));
         h["data.lineage"] = a => Task.FromResult<object?>(Drill.Lineage(s, a.GetProperty("resultId").GetString()!, a.GetProperty("row").GetInt32(), a.GetProperty("col").GetString()!));
         h["data.export"] = async a =>
@@ -52,7 +44,7 @@ public static class QueryCommands
         h["data.alerts.save"] = a => Task.FromResult<object?>(new { alert = alerts.Save(Read<AlertRule>(a, "alert")) });
         h["data.alerts.delete"] = a => { alerts.Delete(Id(a)); return Task.FromResult<object?>(new { }); };
         h["data.alerts.fired"] = a => Task.FromResult<object?>(new { events = alerts.Fired(a.TryGetProperty("limit", out var limit) ? limit.GetInt32() : 100) });
-        h["data.recipes.list"] = _ => Task.FromResult<object?>(new { recipes = recipes.List().Select(r => new { r.Id, r.Name, r.Steps, r.Schedule, r.Enabled, lastRun = scheduler.LastRun(r.Id) }).ToArray() });
+        h["data.recipes.list"] = _ => Task.FromResult<object?>(new { recipes = recipes.List().Select(r => new { r.Id, r.Name, r.Steps, r.Schedule, r.Enabled, lastRun = r.LastRun?.At, lastStatus = r.LastRun == null ? null : new { r.LastRun.Ok, r.LastRun.Message } }).ToArray() });
         h["data.recipes.save"] = a => Task.FromResult<object?>(new { recipe = recipes.Save(Read<ReportRecipe>(a, "recipe")) });
         h["data.recipes.delete"] = a => { recipes.Delete(Id(a)); return Task.FromResult<object?>(new { }); };
         h["data.recipes.run"] = async a => await recipes.Run(Id(a));

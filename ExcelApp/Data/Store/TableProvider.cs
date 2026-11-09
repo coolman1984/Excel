@@ -19,7 +19,7 @@ public sealed class TableProvider : ITableProvider
     public static Table Union(string name,IReadOnlyList<Table> tables) {
         if(tables.Count==0) return new Table(name,Array.Empty<Column>());
         int rows=checked(tables.Sum(x=>x.Rows)); var names=tables.SelectMany(x=>x.Columns).Select(x=>x.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(); var columns=new List<Column>();
-        foreach(var colName in names) {var type=tables.Select(t=>t[colName]).First(c=>c!=null)!.Type;
+        foreach(var colName in names) {var types=tables.Select(t=>t[colName]).Where(c=>c!=null).Select(c=>c!.Type).Distinct().ToArray();var type=types.Length==1?types[0]:ColType.Text;
             if(type==ColType.Text) {var vals=new string?[rows]; int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) if(c!=null && !c.IsNull(i)) vals[offset+i]=c.Text(i); offset+=t.Rows;} columns.Add(TextColumn.From(colName,vals));}
             else if(type==ColType.Bool) {var vals=new sbyte[rows]; Array.Fill(vals,(sbyte)-1); int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) if(c!=null && !c.IsNull(i)) vals[offset+i]=(sbyte)c.Num(i); offset+=t.Rows;} columns.Add(new BoolColumn(colName,vals));}
             else {var vals=new double[rows]; var nulls=new bool[rows]; int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) {nulls[offset+i]=c==null || c.IsNull(i); if(!nulls[offset+i]) vals[offset+i]=c!.Num(i);} offset+=t.Rows;} columns.Add(new NumberColumn(colName,vals,nulls.Any(x=>x)?nulls:null,type));}

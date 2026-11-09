@@ -12,11 +12,36 @@ public sealed class Sandboxes
     readonly DataServices services; readonly ITableProvider source; readonly object gate = new();
     public Sandboxes(DataServices services, ITableProvider source) { this.services = services; this.source = source; }
     static string PathFor(string id) { if (string.IsNullOrWhiteSpace(id) || id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))) throw new UserError("That sandbox identifier is invalid."); return "sandboxes/" + id + ".json"; }
-    SandboxData Load(string id) { string path = PathFor(id); return services.Store.Exists(path) ? JsonSerializer.Deserialize<SandboxData>(services.Store.ReadAllText(path), Json.Options)! : throw new UserError("That sandbox does not exist."); }
-    void Save(SandboxData data) => services.Store.WriteAllText(PathFor(data.Id), JsonSerializer.Serialize(data, Json.Options));
+    SandboxData Load(string id)
+    {
+        string path = PathFor(id);
+        if (!services.Store.Exists(path)) throw new UserError("That sandbox does not exist.");
+        var data = JsonSerializer.Deserialize<SandboxData>(services.Store.ReadAllText(path), Json.Options)!;
+        if (data.Changes.Count > 0 && services.Store.Exists("sandboxes/" + id + ".xvt"))
+        {
+            var edited = TableFile.Open(services.Store, "sandboxes/" + id + ".xvt").Load();
+            foreach (var e in data.Changes)
+            {
+                var c = edited[e.Col] ?? throw new UserError("The sandbox edits are damaged.");
+                e.Value = JsonSerializer.SerializeToElement(c.IsNull(e.Row) ? null : c.Type switch {
+                    ColType.Text => (object)c.Text(e.Row), ColType.Bool => c.Num(e.Row) != 0, _ => c.Num(e.Row) });
+            }
+        }
+        return data;
+    }
+    void Save(SandboxData data)
+    {
+        if (data.Changes.Count > 0)
+        {
+            var edited = Apply(data);
+            var names = data.Changes.Select(e => e.Col).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            TableFile.Write(services.Store, "sandboxes/" + data.Id + ".xvt", new Table(data.Name, edited.Columns.Where(c => names.Contains(c.Name)).ToArray()), new Dictionary<string,string>());
+        }
+        services.Store.WriteAllText(PathFor(data.Id), JsonSerializer.Serialize(new { data.Id, data.Name, data.Base, data.CreatedAt, changes=data.Changes.Select(e => new { e.Row, e.Col }) }, Json.Options));
+    }
     public SandboxData Create(TableRef reference, string name) { var now = DateTime.Now; if (reference.Kind == "report" && reference.AsOf == null && reference.Version == null) reference = reference with { AsOf = now.ToString("yyyy-MM-ddTHH:mm:ss.fffffff", CultureInfo.InvariantCulture) }; source.Get(reference); var data = new SandboxData { Id = Guid.NewGuid().ToString("N"), Name = name, Base = reference, CreatedAt = now.ToUniversalTime() }; lock (gate) Save(data); return data; }
     public IReadOnlyList<SandboxData> List() { lock (gate) return services.Store.List("sandboxes", "*.json").Select(p => JsonSerializer.Deserialize<SandboxData>(services.Store.ReadAllText(p), Json.Options)!).ToArray(); }
-    public void Discard(string id) { lock (gate) services.Store.Delete(PathFor(id)); }
+    public void Discard(string id) { lock (gate) { services.Store.Delete(PathFor(id)); services.Store.Delete("sandboxes/" + id + ".xvt"); } }
     public int Edit(string id, IReadOnlyList<SandboxEdit> edits)
     {
         lock (gate)
@@ -36,9 +61,10 @@ public sealed class Sandboxes
         bool ok = column.Type switch { ColType.Text => value.ValueKind == JsonValueKind.String, ColType.Bool => value.ValueKind is JsonValueKind.True or JsonValueKind.False, ColType.Number => value.ValueKind == JsonValueKind.Number, ColType.Date => value.ValueKind == JsonValueKind.Number || (value.ValueKind == JsonValueKind.String && DateTime.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out _)), _ => false };
         if (!ok) throw new UserError("The value does not match the column type.");
     }
-    public Table Get(string id)
+    public Table Get(string id) { lock (gate) return Apply(Load(id)); }
+    Table Apply(SandboxData data)
     {
-        SandboxData data; lock (gate) data = Load(id); var table = source.Get(data.Base); var changes = data.Changes.GroupBy(e => e.Col, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
+        var table = source.Get(data.Base); var changes = data.Changes.GroupBy(e => e.Col, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.OrdinalIgnoreCase);
         var columns = new List<Column>(); foreach (var col in table.Columns)
         {
             if (!changes.TryGetValue(col.Name, out var edits)) { columns.Add(col); continue; }

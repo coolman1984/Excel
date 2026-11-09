@@ -49,7 +49,7 @@ public sealed class Questions
         {
             string monthName = m.Groups[1].Value; int month = Enumerable.Range(1, 12).FirstOrDefault(n => CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName(n).Equals(monthName, StringComparison.OrdinalIgnoreCase) || CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(n).Equals(monthName, StringComparison.OrdinalIgnoreCase));
             var report = table.Kind == "report" ? table : tables.FirstOrDefault(t => t.Kind == "report"); if (month == 0 || report == null) return Bad("I could not identify the report and month.");
-            int year = m.Groups[2].Success ? int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : DateTime.Today.Year - (month > DateTime.Today.Month ? 1 : 0); spec.Source = Ref(report); spec.History = new HistoryRequest(report.Id, $"{year:D4}-{month:D2}"); return Good("history diff");
+            int year = m.Groups[2].Success ? int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : DateTime.Today.Year - (month > DateTime.Today.Month ? 1 : 0); return new Question(text, null, $"history diff|{report.Id}|{year:D4}-{month:D2}", "Compare the latest two versions of that period in History.", true);
         }
         if ((m = Regex.Match(text, @"^(.+?)\s+this month vs last month$", RegexOptions.IgnoreCase)).Success)
         {

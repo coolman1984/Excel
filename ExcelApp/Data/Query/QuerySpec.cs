@@ -6,8 +6,6 @@ namespace ExcelApp.Data.Query;
 public sealed class QuerySpec
 {
     public TableRef Source { get; set; } = new("table", "");
-    // Local adapter: history questions need the lead to add this optional field to the wire contract.
-    public HistoryRequest? History { get; set; }
     public List<JoinSpec>? Joins { get; set; }
     public JsonElement? Where { get; set; }
     public List<Computed>? Computed { get; set; }
@@ -18,7 +16,6 @@ public sealed class QuerySpec
     public int? Limit { get; set; }
     public List<string>? Columns { get; set; }
 }
-public sealed record HistoryRequest(string ReportTypeId, string Period);
 public sealed record Computed(string Name, string Expr);
 public sealed record Aggregate(string Fn, string? Col, string As);
 public sealed record SortSpec(string Col, bool Desc);

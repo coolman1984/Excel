@@ -3,6 +3,7 @@ public static class StoreTests
 {
     public static void Run(Action<string, bool, string> check, bool offline)
     {
+        Review(check);
         var root = StoreRoot.ForTest(@"D:\ExcelAppTest\syn-plan4-store");
         var table = new Table("合成", new Column[] { new NumberColumn("n", new[] {1.5, 0.0}, new[] {false, true}), new NumberColumn("d", new[] {45000.0, 0.0}, new[] {false, true}, ColType.Date), TextColumn.From("t", new string?[] {"مرحبا", null}), new BoolColumn("b", new sbyte[] {1,-1}) });
         TableFile.Write(root, "round.xvt", table, new Dictionary<string,string> { ["test"] = "yes" });
@@ -72,5 +73,22 @@ public static class StoreTests
         using(var exportQueue=new WorkQueue()) {var exporter=new Exporter(root,exportQueue,()=>new Settings());bool pdfDenied=false;try {exporter.ExportAsync(new ExportJob {Pdf=true},null,CancellationToken.None);} catch(ExcelApp.UserError) {pdfDenied=true;}check("export pdf disabled",pdfDenied,"");}
         var catalog = new Catalog(root); int a = catalog.NextVersion(), b = catalog.NextVersion(); check("catalog version sequence", b == a + 1, "");
     }
+    static void Review(Action<string, bool, string> check)
+    {
+        var root = StoreRoot.ForTest(@"D:\ExcelAppTest\syn-review-store-" + Guid.NewGuid().ToString("N"));
+        var ids = new System.Collections.Concurrent.ConcurrentBag<int>();
+        Parallel.For(0, 20, _ => ids.Add(new Catalog(root).NextVersion()));
+        check("review catalog concurrent instances", ids.Distinct().Count() == 20, "");
+        check("review locks require no direct lock files", root.List("", "*.lock").Count == 0, "");
+        root.WriteAllText("broken.xvt", "not a table");
+        bool plain = false;
+        try { TableFile.Open(root, "broken.xvt"); } catch (ExcelApp.UserError) { plain = true; } catch { }
+        check("review broken xvt has plain error", plain, "");
+        var union = TableProvider.Union("synthetic", new[] {
+            new Table("old", new Column[] { new NumberColumn("Code", new[] { 12d }, null) }),
+            new Table("new", new Column[] { TextColumn.From("Code", new[] { "0012" }) }) });
+        check("review union preserves text schema and leading zeros", union["Code"]!.Type == ColType.Text && union["Code"]!.Text(1) == "0012", "");
+    }
+
 }
 

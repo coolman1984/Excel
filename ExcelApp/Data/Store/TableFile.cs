@@ -53,6 +53,14 @@ public static class TableFile
     }
     public static LazyTable Open(FileRoot root, string relative)
     {
+        try { return OpenCore(root, relative); }
+        catch (UserError) { throw; }
+        catch (FileNotFoundException) { throw; } // preserve the missing committed-file distinction
+        catch (Exception e) when (e is IOException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException)
+        { throw new UserError("The stored table is damaged or could not be opened."); }
+    }
+    static LazyTable OpenCore(FileRoot root, string relative)
+    {
         using var s = root.OpenRead(relative); using var r = new BinaryReader(s, Encoding.UTF8, true);
         if (Encoding.ASCII.GetString(r.ReadBytes(8)) != "XVTABLE1" || r.ReadInt32() != 1) throw new InvalidDataException("Invalid table format.");
         int n = r.ReadInt32(); if (n < 2 || n > 16 * 1024 * 1024 || n > s.Length - s.Position) throw new InvalidDataException("Invalid table header.");

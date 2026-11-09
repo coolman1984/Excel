@@ -17,11 +17,25 @@ public sealed class Catalog
     public Catalog(StoreRoot root) { this.root = root; gate = Gates.GetOrAdd(root.PathOf("catalog.json"), _ => new object()); }
     CatalogData Read() => root.Exists("catalog.json") ? JsonSerializer.Deserialize<CatalogData>(root.ReadAllText("catalog.json"), Json.Options) ?? throw new InvalidDataException("Invalid catalog.") : new();
     public T Update<T>(Func<CatalogData,T> edit) { lock (gate) { using var lease = Acquire(root, "catalog.json"); var data = Read(); T value = edit(data); root.WriteAllText("catalog.json", JsonSerializer.Serialize(data, Json.Options)); return value; } }
-    internal static FileStream Acquire(FileRoot root, string name) {
-        string path = root.PathOf(name + ".lock"); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var until = DateTime.UtcNow.AddSeconds(5);
-        while (true) { try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-            catch (IOException) when (DateTime.UtcNow < until) { Thread.Sleep(50); } }
+    internal static IDisposable Acquire(FileRoot root, string name)
+    {
+        // A kernel mutex coordinates host instances without creating files outside FileRoot.
+        string path = root.PathOf(name).ToUpperInvariant();
+        string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path)));
+        var mutex = new Mutex(false, @"Local\ExcelAppData-" + hash);
+        try
+        {
+            bool entered;
+            try { entered = mutex.WaitOne(TimeSpan.FromSeconds(5)); }
+            catch (AbandonedMutexException) { entered = true; }
+            if (!entered) throw new UserError("The data store is busy. Try again shortly.");
+            return new Lease(mutex);
+        }
+        catch { mutex.Dispose(); throw; }
+    }
+    sealed class Lease(Mutex mutex) : IDisposable
+    {
+        public void Dispose() { mutex.ReleaseMutex(); mutex.Dispose(); }
     }
     public CatalogData Snapshot() { lock (gate) return Read(); }
     public int NextVersion() => Update(c => checked(c.NextVersionId++));

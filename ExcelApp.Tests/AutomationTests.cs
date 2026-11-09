@@ -34,6 +34,8 @@ public static class AutomationTests
         var october = recipes.Run("monthly", "2026-10").GetAwaiter().GetResult();
         provider.Set(new Table("synthetic", new Column[] { TextColumn.From("Category", new string?[] { "N" }), new NumberColumn("Amount", new[] { 42d }, null) }));
         var november = recipes.Run("monthly", "2026-11").GetAwaiter().GetResult();
+        var persistedRecipe = JsonSerializer.SerializeToElement(new ReportRecipes(services, views).Get("monthly"), Json.Options);
+        check("review recipe persists last run status", persistedRecipe.TryGetProperty("lastRun", out var lastRun) && lastRun.ValueKind == JsonValueKind.Object && lastRun.GetProperty("ok").GetBoolean() && lastRun.TryGetProperty("at", out _), "");
         check("recipe replay october november", october.Ok && november.Ok && exporter.Jobs.Count == 2 && exporter.Jobs[0].Sheets[0].Rows.Count == 3 && exporter.Jobs[1].Sheets[0].Rows.Count == 1 && exporter.Jobs[1].Sheets[0].Rows[0][1] == "42" && exporter.Jobs[1].Target == "2026-11-Monthly.xlsx", "");
         recipes.Save(new ReportRecipe { Id = "scheduled", Name = "Scheduled", Enabled = true, Schedule = new Schedule { Kind = "daily", Time = "09:00" }, Steps = new() { new RecipeStep { Kind = "query", Spec = new QuerySpec { Source = new("report", "r") } } } });
         using (var scheduler = new Scheduler(services, recipes)) { var clock = new DateTime(2026, 11, 5, 10, 0, 0); scheduler.Tick(clock).GetAwaiter().GetResult(); var first = scheduler.LastRun("scheduled"); scheduler.Tick(clock.AddMinutes(1)).GetAwaiter().GetResult(); check("scheduler missed run once", first == clock && scheduler.LastRun("scheduled") == clock, ""); }
@@ -41,6 +43,9 @@ public static class AutomationTests
         recipes.Delete("scheduled"); recipes.Delete("monthly"); provider.Set(table);
         var sandboxes = new Sandboxes(services, provider); var sandbox = sandboxes.Create(new("report", "r"), "Synthetic");
         using (var edit = JsonDocument.Parse("99")) sandboxes.Edit(sandbox.Id, new[] { new SandboxEdit { Row = 0, Col = "Amount", Value = edit.RootElement } });
+        using (var savedSandbox = JsonDocument.Parse(services.Store.ReadAllText("sandboxes/" + sandbox.Id + ".json")))
+            check("review sandbox JSON has no cell values", !savedSandbox.RootElement.TryGetProperty("changes", out var changes) || changes.EnumerateArray().All(e => !e.TryGetProperty("value", out _)), "");
+        check("review sandbox edited columns use xvt", services.Store.Exists("sandboxes/" + sandbox.Id + ".xvt"), "");
         check("sandbox report base pinned", sandbox.Base.AsOf != null, "");
         var changed = sandboxes.Get(sandbox.Id); var difference = sandboxes.Compare(sandbox.Id);
         check("sandbox copy on write and compare", changed["Amount"]!.Num(0) == 99 && table["Amount"]!.Num(0) == 10 && ReferenceEquals(changed["Category"], table["Category"]) && difference.Changed == 1 && difference.Columns.Any(c => c.Name == "_status") && Format.Page(services.Results, difference.ResultId, 0, 10).Rows[0].Contains("changed"), "");
@@ -66,15 +71,11 @@ public static class AutomationTests
         var questionTable = new Table("synthetic", new Column[] { TextColumn.From("Category", new string?[] { "A" }), new NumberColumn("Amount", new[] { 10d }, null), new NumberColumn("Date", new[] { DateTime.Today.ToOADate() }, null, ColType.Date) }); provider.Set(questionTable);
         var questions = new Questions(services); string[] examples = { "top 3 Category by Amount", "bottom 3 Category by Amount", "total Amount by Category", "count by Category", "average Amount by Category", "max Amount", "min Amount", "rows where Amount > 2", "Category is A", "show Sales", "duplicates in Category", "blank Category", "sort by Amount desc", "Amount per Category in last month", "trend of Amount by month", "compare Sales and Budget by Category", "how many rows in Sales", "last 7 days of Sales", "Amount this month vs last month" };
         foreach (string example in examples) check("question " + example, questions.Ask(example).Ok, "");
-        var historyQuestion = questions.Ask("what changed in October 2026"); check("question history diff adapter", historyQuestion.Ok && historyQuestion.Spec?.History?.Period == "2026-10", "");
+        check("review QuerySpec matches declined history contract", typeof(QuerySpec).GetProperty("History") == null, "");
+        var historyQuestion = questions.Ask("what changed in October 2026"); check("question history diff adapter", historyQuestion.Ok && historyQuestion.Spec == null && historyQuestion.Pattern == "history diff|r|2026-10", "");
         check("question unknown", !questions.Ask("unrelated nonsense").Ok, ""); provider.Set(table);
         var handlers = new Dictionary<string, Func<JsonElement, Task<object?>>>(); QueryCommands.Register(handlers, services);
         string[] commands = { "data.run", "data.page", "data.release", "data.drill", "data.lineage", "data.export", "data.views.list", "data.views.save", "data.views.delete", "data.views.run", "data.links.list", "data.links.save", "data.links.delete", "data.links.run", "data.alerts.list", "data.alerts.save", "data.alerts.delete", "data.alerts.fired", "data.recipes.list", "data.recipes.save", "data.recipes.delete", "data.recipes.run", "data.sandbox.create", "data.sandbox.list", "data.sandbox.discard", "data.sandbox.edit", "data.sandbox.compare", "data.sandbox.keep", "data.library.preview", "data.library.export", "data.library.import", "data.dashboard.list", "data.dashboard.save", "data.dashboard.delete", "data.dashboard.values", "data.ask" };
-        int comparedFrom = 0, comparedTo = 0;
-        handlers["data.history.versions"] = _ => Task.FromResult<object?>(new { versions = new[] { new { period = "2026-10", version = 1 }, new { period = "2026-10", version = 3 }, new { period = "2026-10", version = 2 } } });
-        handlers["data.history.diff"] = a => { comparedFrom = a.GetProperty("from").GetInt32(); comparedTo = a.GetProperty("to").GetInt32(); return Task.FromResult<object?>(new { resultId = "synthetic" }); };
-        handlers["data.run"](JsonSerializer.SerializeToElement(new { spec = historyQuestion.Spec }, Json.Options)).GetAwaiter().GetResult();
-        check("history question dispatches latest versions", comparedFrom == 2 && comparedTo == 3, "");
         check("all lane B commands registered", commands.All(handlers.ContainsKey), ""); foreach (var owned in services.Owned) owned.Dispose(); services.Owned.Clear();
         views.Delete("exceptions"); views.DeleteLink("link"); check("delete view and link", views.List().Count == 0 && views.ListLinks().Count == 0, "");
     }
