@@ -84,6 +84,15 @@ public static class StoreTests
         bool plain = false;
         try { TableFile.Open(root, "broken.xvt"); } catch (ExcelApp.UserError) { plain = true; } catch { }
         check("review broken xvt has plain error", plain, "");
+        // A header that opens but promises more rows than its column holds fails on the lazy column read: still a plain sentence.
+        TableFile.Write(root, "short.xvt", new Table("short", new Column[] { new NumberColumn("N", new[] { 1d, 2d }, null) }), new Dictionary<string, string>());
+        byte[] bytes; using (var rs = root.OpenRead("short.xvt")) { bytes = new byte[rs.Length]; rs.ReadExactly(bytes); }
+        string text = System.Text.Encoding.Latin1.GetString(bytes);
+        int at = text.IndexOf("\"rows\":2", StringComparison.Ordinal); bytes[at + 7] = (byte)'3';
+        using (var ws = root.OpenWrite("short.xvt")) ws.Write(bytes); root.Commit("short.xvt");
+        bool lazyPlain = false;
+        try { TableFile.Open(root, "short.xvt").Load(); } catch (ExcelApp.UserError) { lazyPlain = true; } catch { }
+        check("review damaged column has plain error", lazyPlain, "");
         var union = TableProvider.Union("synthetic", new[] {
             new Table("old", new Column[] { new NumberColumn("Code", new[] { 12d }, null) }),
             new Table("new", new Column[] { TextColumn.From("Code", new[] { "0012" }) }) });

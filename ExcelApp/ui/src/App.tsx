@@ -1,5 +1,4 @@
 import * as React from "react";
-import { DataApp } from "./data/DataApp";
 import { call, on as onEvent, isMock } from "./bridge";
 import { PaintSignal } from "./paintSignal";
 import { resolveCommand } from "./keys";
@@ -11,6 +10,7 @@ import { SheetTabs } from "./bars/SheetTabs";
 import { StatusBar } from "./bars/StatusBar";
 import { Dialogs } from "./dialogHost";
 import { increaseDecimals, decreaseDecimals, PERCENT_CODE, COMMA_CODE, GENERAL } from "./numberFormat";
+import { SHORTCUT_FORMATS, fillRange, todayInput, timeInput } from "./shortcuts";
 import type { WorkbookInfo, SheetInfo, Stats, CellStyle, Condition, SortKey } from "./types";
 
 type AppState = "empty" | "opening" | "ready";
@@ -23,6 +23,9 @@ function colFromLetters(s: string): number {
 }
 
 /** Column letters for a 1-based column number (1 -> "A"). */
+// The Data mode is loaded the first time it is opened, so the editor starts with a smaller bundle.
+const DataApp = React.lazy(() => import("./data/DataApp").then((m) => ({ default: m.DataApp })));
+
 function lettersFromCol(n: number): string {
     let s = "";
     while (n > 0) {
@@ -341,8 +344,9 @@ export function App(): React.ReactElement {
     );
 
     const doFill = React.useCallback(
-        async (from: number[], to: number[]) => {
-            const res: any = await call("fill", { sheet: sheetIndex, from, to });
+        async (from: number[], to: number[], copy = false) => {
+            // copy: Ctrl+D / Ctrl+R copy exactly; the fill handle continues a series
+            const res: any = await call("fill", { sheet: sheetIndex, from, to, copy });
             applyChanged(res);
             setDirty(true);
         },
@@ -448,6 +452,10 @@ export function App(): React.ReactElement {
         while (left - 1 >= 0 && gridRef.current?.store.getRow(row)?.cells[left - 1]?.kind === 1) left--;
         if (left < col) void commitCell(row, col, `=SUM(${L(left)}${row + sheet.firstRow}:${L(col - 1)}${row + sheet.firstRow})`);
     }, [sheet, activeCell, numberAbove, commitCell]);
+
+    const onFormatCells = React.useCallback(() => {
+        if (sheet) setDialog({ name: "FormatCells", props: { code: numFmt, onApply: onNumberFormat, onClose: () => setDialog(null) } });
+    }, [sheet, numFmt, onNumberFormat]);
 
     const doSort = React.useCallback(
         async (col: number, desc: boolean) => {
@@ -598,6 +606,18 @@ export function App(): React.ReactElement {
                 case "nextSheet": selectSheet(Math.min((workbook?.sheets.length ?? 1) - 1, sheetIndex + 1)); return true;
                 case "zoomIn": setZoomPct(zoom + 10); return true;
                 case "zoomOut": setZoomPct(zoom - 10); return true;
+                case "fillDown":
+                case "fillRight": {
+                    const fr = sheet ? fillRange(cmd === "fillDown" ? "down" : "right", selection) : null;
+                    if (fr) void doFill(fr.from, fr.to, true).catch((e: Error) => setStatus(e.message));
+                    return true;
+                }
+                case "insertDate": if (sheet) void commitCell(activeCell.row, activeCell.col, todayInput(new Date())); return true;
+                case "insertTime": if (sheet) void commitCell(activeCell.row, activeCell.col, timeInput(new Date())); return true;
+                case "autoSum": onAutoSum(); return true;
+                case "formatCells": onFormatCells(); return true;
+                case "selectColumn": if (sheet) gridRef.current?.setSelection(0, selection.c1, Math.max(0, viewRows - 1), selection.c2); return true;
+                case "selectRow": if (sheet) gridRef.current?.setSelection(selection.r1, 0, selection.r2, Math.max(0, sheet.cols - 1)); return true;
                 case "edgeUp":
                 case "edgeDown":
                 case "edgeLeft":
@@ -605,10 +625,14 @@ export function App(): React.ReactElement {
                     void doEdge(cmd);
                     return true;
                 default:
+                    if (cmd in SHORTCUT_FORMATS) {
+                        if (sheet) onNumberFormat(SHORTCUT_FORMATS[cmd]);
+                        return true;
+                    }
                     return false;
             }
         },
-        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell.col, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge]
+        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge, selection, doFill, commitCell, onAutoSum, onFormatCells, onNumberFormat]
     );
 
     const dispatchRef = React.useRef(dispatch);
@@ -708,6 +732,7 @@ export function App(): React.ReactElement {
                 onIncrease={onIncrease}
                 onDecrease={onDecrease}
                 onAutoSum={onAutoSum}
+                onFormatCells={onFormatCells}
                 onClearAll={onClearAll}
                 onClearContents={onClearContents}
                 onClearFormats={onClearFormats}
@@ -842,7 +867,7 @@ export function App(): React.ReactElement {
             )}
 
             </div>
-            {mode === "data" && <DataApp />}
+            {mode === "data" && <React.Suspense fallback={<div className="data-loading" role="status">Loading Data...</div>}><DataApp /></React.Suspense>}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>

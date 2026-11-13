@@ -24,6 +24,7 @@ public sealed partial class Evaluator
         switch (node)
         {
             case Literal l: return l.Value;
+            case Omitted: return FValue.Blank;
             case Reference r: int s = Sheet(r); return s < 0 ? FValue.Error("#REF!") : grid.Get(s, r.Row, r.Col);
             case Range: return FValue.Error("#VALUE!");
             case Unary u: { var v = Evaluate(u.Value); if (v.Kind is ValueKind.Error or ValueKind.Unsupported) return v; var n = Number(v); return n == null ? FValue.Error("#VALUE!") : FValue.Num(u.Op == "-" ? -n.Value : n.Value / 100); }
@@ -74,9 +75,12 @@ public sealed partial class Evaluator
         if (name == "XLOOKUP")
         {
             if (args.Count < 3) return FValue.Error("#VALUE!"); var returns = Values(args[2]).ToArray(); if (returns.Length != search.Length) return FValue.Error("#VALUE!");
-            int mode = args.Count > 4 && Number(Evaluate(args[4])) is double mm ? (int)mm : 0, direction = args.Count > 5 && Number(Evaluate(args[5])) is double dd ? (int)dd : 1; if (mode is not (0 or -1 or 1 or 2) || direction is not (1 or -1)) return FValue.Error("#VALUE!");
+            bool Given(int i) => args.Count > i && args[i] is not Omitted;
+            int mode = Given(4) && Number(Evaluate(args[4])) is double mm ? (int)mm : 0, direction = Given(5) && Number(Evaluate(args[5])) is double dd ? (int)dd : 1; if (mode is not (0 or -1 or 1 or 2) || direction is not (1 or -1 or 2 or -2)) return FValue.Error("#VALUE!");
+            // Binary modes (2, -2) need data sorted ascending / descending; on sorted data a first-to-last scan finds the same cell.
+            if (direction is 2 or -2) direction = 1;
             int found = -1; double best = double.PositiveInfinity; for (int n = 0; n < search.Length; n++) { int i = direction == 1 ? n : search.Length - 1 - n; var candidate = search[i]; bool equal = mode == 2 ? Criterion(candidate, target) : candidate.Kind == ValueKind.Text || target.Kind == ValueKind.Text ? string.Equals(Text(candidate), Text(target), StringComparison.OrdinalIgnoreCase) : Number(candidate) == Number(target); if (equal) { found = i; break; } if (mode is -1 or 1 && Number(candidate) is double x && Number(target) is double y && (mode == -1 ? x < y : x > y) && Math.Abs(x - y) < best) { best = Math.Abs(x - y); found = i; } }
-            return found >= 0 ? returns[found] : args.Count >= 4 ? Evaluate(args[3]) : FValue.Error("#N/A");
+            return found >= 0 ? returns[found] : Given(3) ? Evaluate(args[3]) : FValue.Error("#N/A");
         }
         if (args[1] is not Range matrix || args.Count < 3 || Number(Evaluate(args[2])) is not double offset) return FValue.Error("#VALUE!");
         int startRow = Math.Min(matrix.Start.Row, matrix.End.Row), startCol = Math.Min(matrix.Start.Col, matrix.End.Col), rowCount = Math.Abs(matrix.End.Row - matrix.Start.Row) + 1, colCount = Math.Abs(matrix.End.Col - matrix.Start.Col) + 1, position = (int)offset - 1; bool horizontal = name == "HLOOKUP"; if (position < 0 || position >= (horizontal ? rowCount : colCount)) return FValue.Error("#REF!");

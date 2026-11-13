@@ -28,6 +28,7 @@ static class TestProgram
             Suite("style", () => StyleTests.Run(Check, offline));
             Suite("journal", () => JournalTests.Run(Check));
             Suite("calc", () => CalcTests.Run(Check));
+            Suite("fill", () => FillTests.Run(Check));
             // plan 4: lane A owns StoreTests/IngestTests, lane B owns QueryTests/AutomationTests/FormulaTests
             Suite("store", () => StoreTests.Run(Check, offline));
             Suite("ingest", () => IngestTests.Run(Check, offline));

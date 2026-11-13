@@ -337,7 +337,7 @@ public static class HostTests
             check("fill: the source repeats over the target", f.GetProperty("changed").GetArrayLength() == 3 && Text(b, 0, 4, 1) == "1", "");
             Call(b, "undo", new { sheet = 0 });
             var f2 = Call(b, "fill", new { sheet = 0, from = new[] { 1, 0, 2, 0 }, to = new[] { 1, 0, 5, 0 } });
-            check("fill: a two-cell pattern alternates", Text(b, 0, 3, 0) == "item-1" && Text(b, 0, 4, 0) == "item-2", "");
+            check("fill: two numbered text cells continue the step, as in Excel", Text(b, 0, 3, 0) == "item-3" && Text(b, 0, 4, 0) == "item-4", Text(b, 0, 3, 0) + "," + Text(b, 0, 4, 0));
             Call(b, "undo", new { sheet = 0 });
         });
         Try("filter and sort", () =>

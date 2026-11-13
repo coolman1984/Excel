@@ -7,3 +7,6 @@
 .data-top .notification-bell{position:relative;display:grid;place-items:center;width:38px;height:38px;margin-left:auto;color:#355442}.unread-count{position:absolute;right:-6px;top:-7px;background:#b53b32;color:white;border-radius:12px;min-width:18px;padding:2px 4px;font-size:11px;line-height:14px}.data-toasts{top:57px;right:20px;bottom:auto;z-index:10;min-width:240px;max-width:360px}.data-toasts div{margin-top:3px}
 .mode-switch{display:inline-flex;border:1px solid #ffffffa0;border-radius:4px;overflow:hidden;margin-left:10px}.mode-switch button{border:0;background:transparent;color:white;padding:3px 12px;font:inherit;cursor:pointer}.mode-switch button+button{border-left:1px solid #ffffff80}.mode-switch button.active{background:#fff;color:#126b3a;font-weight:600}.mode-switch button:focus-visible{outline:2px solid white;outline-offset:-2px}
 .delta-up{color:#13723e;font-weight:600}.delta-down{color:#b13c34;font-weight:600}.home-empty{background:white;border:1px solid #dce5dd;border-radius:5px;padding:28px;margin-top:16px;color:#294b34}.home-empty p{margin-bottom:0}
+
+/* The top bar keeps its height; a long page scrolls inside the content area, never the whole window. */
+.data-main{min-height:0}.data-top{flex:none}.data-content{flex:1;min-height:0}
