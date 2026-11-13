@@ -27,6 +27,8 @@ export interface CellData {
     color?: string;
     warn?: boolean;
     style?: CellStyle;
+    /** The formula behind a calculated cell; the in-cell editor shows this instead of the result. */
+    formula?: string;
 }
 
 /** A view row: [rowNumber, [cell, ...]] in wire form, kept decoded here. */

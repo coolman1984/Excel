@@ -13,17 +13,63 @@ public static class EditMarks
     public static bool IsStyleOnly(CellEdit e) => e.Kind == EditKind.Clear && e.Text == StyleOnly;
 }
 
-public readonly record struct Shown3(string Text, byte Kind, double Num, int? Color, bool Warn, StyleDelta? Style, bool Edited);
+public readonly record struct Shown3(string Text, byte Kind, double Num, int? Color, bool Warn, StyleDelta? Style, bool Edited, string? Formula = null);
 
 public sealed class Cells
 {
     readonly CacheData cache; readonly EditSet edits; readonly object editLock;
     readonly Func<StyleSidecar?> sidecar;
     readonly ConcurrentDictionary<string, NumFmt?> formats = new();
-    static readonly StyleDelta FormulaStyle = new(Italic: true, FontColor: 0x555555);
+    public readonly Formula.Calc Calc;
 
     public Cells(CacheData cache, EditSet edits, object editLock, Func<StyleSidecar?> sidecar)
-    { this.cache = cache; this.edits = edits; this.editLock = editLock; this.sidecar = sidecar; }
+    { this.cache = cache; this.edits = edits; this.editLock = editLock; this.sidecar = sidecar; Calc = new Formula.Calc(cache, edits, editLock); }
+
+    /// <summary>True when any edited cell holds a formula, so other cells' changes can change what is shown.</summary>
+    public bool HasFormulas { get { lock (editLock) return edits.HasFormulas; } }
+
+    /// <summary>Excel shows a calculated number with 15 significant digits (0.1+0.2 shows 0.3).</summary>
+    public static double Excel15(double v) => v == 0 || !double.IsFinite(v) ? v : double.Parse(v.ToString("G15", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+
+    Shown3 FormulaShown(int sheet, SheetReader rd, int row, int col, CellEdit edit, StyleDelta? style)
+    {
+        string f = edit.Formula ?? "";
+        var v = Calc.Result(sheet, row, col, f);
+        switch (v.Kind)
+        {
+            case Formula.ValueKind.Text: return new Shown3(v.Text ?? "", CellKind.Text, 0, null, false, style, true, f);
+            case Formula.ValueKind.Bool: return new Shown3(v.Number != 0 ? "TRUE" : "FALSE", CellKind.Bool, v.Number != 0 ? 1 : 0, null, false, style, true, f);
+            case Formula.ValueKind.Error: return new Shown3(v.Text ?? "#VALUE!", CellKind.Error, 0, null, false, style, true, f);
+            case Formula.ValueKind.Unsupported: return new Shown3("#NAME?", CellKind.Error, 0, null, false, style, true, f);
+        }
+        double n = Excel15(v.Kind == Formula.ValueKind.Number ? v.Number : 0);
+        string? code = edit.Style?.NumberFormat;
+        Shown3 s;
+        if (code != null) s = FormatNumber(code, n, style, true);
+        else
+        {
+            var chunk = ColumnChunk.Build(1, new[] { CellKind.Number }, new[] { n }, null);
+            var cv = rd.Show(chunk, 0, row, col);
+            s = new Shown3(cv.Text, CellKind.Number, n, cv.Color == null ? null : (cv.Color.Value.R << 16) | (cv.Color.Value.G << 8) | cv.Color.Value.B, cv.Warn, style, true);
+            if (cv.Warn && string.Equals(FileFormat(sheet, row, col), "General", StringComparison.OrdinalIgnoreCase))
+                s = new Shown3(n.ToString("G15", CultureInfo.CurrentCulture), CellKind.Number, n, null, false, style, true);
+        }
+        return s with { Formula = f };
+    }
+
+    /// <summary>The calculated value of a cell for statistics: kind (0 empty, 1 number, 2 text, 3 bool, 4 error) and number.</summary>
+    public (byte Kind, double Num) FormulaValue(int sheet, int row, int col, string formula)
+    {
+        var v = Calc.Result(sheet, row, col, formula);
+        return v.Kind switch
+        {
+            Formula.ValueKind.Number => (CellKind.Number, v.Number),
+            Formula.ValueKind.Blank => (CellKind.Number, 0),
+            Formula.ValueKind.Bool => (CellKind.Bool, v.Number),
+            Formula.ValueKind.Text => (CellKind.Text, 0),
+            _ => (CellKind.Error, 0),
+        };
+    }
 
     public bool HasEdits { get { lock (editLock) return edits.All.Count > 0; } }
 
@@ -89,7 +135,7 @@ public sealed class Cells
                 case EditKind.Clear: return new Shown3("", CellKind.Empty, 0, null, false, style, true);
                 case EditKind.Text: return new Shown3(edit.Text ?? "", CellKind.Text, 0, null, false, style, true);
                 case EditKind.Bool: { bool b = edit.Bool ?? edit.Num != 0; return new Shown3(b ? "TRUE" : "FALSE", CellKind.Bool, b ? 1 : 0, null, false, style, true); }
-                case EditKind.Formula: return new Shown3(edit.Formula ?? "", CellKind.Text, 0, null, false, FormulaStyle.Merge(style), true);
+                case EditKind.Formula: return FormulaShown(sheet, rd, row, col, edit, style);
                 case EditKind.Number:
                     {
                         string? code = edit.Style?.NumberFormat;
@@ -115,7 +161,7 @@ public sealed class Cells
     {
         string? color = s.Color == null ? null : Hex(s.Color.Value);
         object? style = StyleJson(s.Style);
-        var cell = new List<object?> { s.Text, (int)s.Kind, Align(s), color, s.Warn ? true : null, style };
+        var cell = new List<object?> { s.Text, (int)s.Kind, Align(s), color, s.Warn ? true : null, style, s.Formula };
         while (cell.Count > 3 && cell[^1] == null) cell.RemoveAt(cell.Count - 1);
         return cell.ToArray();
     }

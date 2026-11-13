@@ -215,7 +215,10 @@ export function App(): React.ReactElement {
 
     const refreshView = React.useCallback(() => setViewKey((k) => k + 1), []);
 
-    const applyChanged = React.useCallback((changed: number[][]) => {
+    const applyChanged = React.useCallback((res: { changed?: number[][]; recalc?: boolean } | null | undefined) => {
+        // With formulas on the sheet any cell can show a new result, so read the visible rows again.
+        if (res?.recalc) { gridRef.current?.refresh(); return; }
+        const changed = res?.changed;
         if (changed && changed.length > 0) gridRef.current?.invalidateCells(changed);
     }, []);
 
@@ -302,7 +305,7 @@ export function App(): React.ReactElement {
             if (!sheet) return;
             const ranges = [[selection.r1, selection.c1, selection.r2, selection.c2]];
             const res: any = await call("setStyle", { sheet: sheetIndex, ranges, style });
-            applyChanged(res.changed);
+            applyChanged(res);
             setDirty(true);
         },
         [sheet, selection, sheetIndex, applyChanged]
@@ -310,8 +313,17 @@ export function App(): React.ReactElement {
 
     const commitCell = React.useCallback(
         async (viewRow: number, col: number, text: string) => {
-            const res: any = await call("setCell", { sheet: sheetIndex, row: viewRow, col, input: text });
-            applyChanged(res.changed);
+            let res: any;
+            try {
+                res = await call("setCell", { sheet: sheetIndex, row: viewRow, col, input: text });
+            } catch (e) {
+                // Excel refuses a formula it cannot read; say why and leave the cell as it was.
+                const msg = (e as Error)?.message ?? String(e);
+                setStatus(msg);
+                setDialog({ name: "Message", props: { title: "Microsoft Excel", text: msg, onClose: () => setDialog(null) } });
+                return;
+            }
+            applyChanged(res);
             setDirty(true);
             setCellRaw(text);
         },
@@ -322,7 +334,7 @@ export function App(): React.ReactElement {
         async (ranges: number[][], what = "contents") => {
             if (!sheet) return;
             const res: any = await call("clearCells", { sheet: sheetIndex, ranges, what });
-            applyChanged(res.changed);
+            applyChanged(res);
             setDirty(true);
         },
         [sheet, sheetIndex, applyChanged]
@@ -331,7 +343,7 @@ export function App(): React.ReactElement {
     const doFill = React.useCallback(
         async (from: number[], to: number[]) => {
             const res: any = await call("fill", { sheet: sheetIndex, from, to });
-            applyChanged(res.changed);
+            applyChanged(res);
             setDirty(true);
         },
         [sheetIndex, applyChanged]
@@ -555,7 +567,7 @@ export function App(): React.ReactElement {
         async (range: any, style: CellStyle) => {
             const ranges = Array.isArray(range) ? [range] : rangesNow();
             const res: any = await call("setStyle", { sheet: sheetIndex, ranges, style });
-            applyChanged(res.changed);
+            applyChanged(res);
         },
         [sheetIndex, rangesNow, applyChanged]
     );

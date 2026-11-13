@@ -2,8 +2,11 @@ using System.Globalization;
 
 namespace ExcelApp.Formula;
 
-public sealed class Evaluator
+public sealed partial class Evaluator
 {
+    /// <summary>The worksheet row and column (0-based) of the cell being calculated, for ROW() and COLUMN(); -1 when unknown.</summary>
+    public int Row { get; init; } = -1;
+    public int Col { get; init; } = -1;
     static readonly HashSet<string> Supported = new(StringComparer.Ordinal) { "SUM", "SUMIF", "SUMIFS", "COUNT", "COUNTA", "COUNTBLANK", "COUNTIF", "COUNTIFS", "AVERAGE", "AVERAGEIF", "AVERAGEIFS", "MIN", "MAX", "IF", "IFS", "IFERROR", "IFNA", "AND", "OR", "NOT", "VLOOKUP", "HLOOKUP", "XLOOKUP", "INDEX", "MATCH", "ROUND", "ROUNDUP", "ROUNDDOWN", "ABS", "INT", "MOD", "LEFT", "RIGHT", "MID", "LEN", "TRIM", "UPPER", "LOWER", "TEXT", "VALUE", "CONCAT", "CONCATENATE", "TEXTJOIN", "TODAY", "NOW", "DATE", "YEAR", "MONTH", "DAY", "EOMONTH", "EDATE", "WEEKDAY", "WEEKNUM", "NETWORKDAYS" };
     readonly IFormulaGrid grid; readonly int sheet;
     public Evaluator(IFormulaGrid grid, int sheet = 0) { this.grid = grid; this.sheet = sheet; }
@@ -13,7 +16,7 @@ public sealed class Evaluator
     int Sheet(Reference r) => r.Sheet == null ? sheet : grid.SheetIndex(r.Sheet);
     IEnumerable<FValue> Values(Node node)
     {
-        if (node is Range range) { int s = Sheet(range.Start); if (s < 0) { yield return FValue.Error("#REF!"); yield break; } for (int r = Math.Min(range.Start.Row, range.End.Row); r <= Math.Max(range.Start.Row, range.End.Row); r++) for (int c = Math.Min(range.Start.Col, range.End.Col); c <= Math.Max(range.Start.Col, range.End.Col); c++) yield return grid.Get(s, r, c); }
+        if (node is Range range) { int s = Sheet(range.Start); if (s < 0) { yield return FValue.Error("#REF!"); yield break; } var (r1, c1, r2, c2) = Bounds(range, s); for (int r = r1; r <= r2; r++) for (int c = c1; c <= c2; c++) yield return grid.Get(s, r, c); }
         else yield return Evaluate(node);
     }
     public FValue Evaluate(Node node)
@@ -83,6 +86,7 @@ public sealed class Evaluator
     FValue Function(Call call)
     {
         var args = call.Args; string name = call.Name;
+        if (More(call) is FValue extra) return extra;
         if (!Supported.Contains(name)) return FValue.Unsupported;
         if (name is "INDEX" or "MATCH" or "XLOOKUP" or "VLOOKUP" or "HLOOKUP") return Lookup(call);
         if (name is "COUNTIF" or "COUNTIFS" or "SUMIF" or "SUMIFS" or "AVERAGEIF" or "AVERAGEIFS") return Conditional(call);

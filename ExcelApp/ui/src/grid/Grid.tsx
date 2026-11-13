@@ -297,7 +297,7 @@ export const Grid = React.forwardRef<GridHandle, Props>(function Grid(props, ref
         const align = st?.align ?? cd.align;
         const cell: ExcelCell = {
             kind: GridCellKind.Text,
-            data: cd.text,
+            data: cd.formula ?? cd.text,
             displayData: cd.warn ? cd.text + " \u26A0" : cd.text,
             allowOverlay: true,
             contentAlign: alignToContent(align),

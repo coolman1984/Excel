@@ -122,7 +122,23 @@ function PlaceholderClosePrompt({ fileName, onAnswer }: any): React.ReactElement
     );
 }
 
+function MessageBox({ title, text, onClose }: { title?: string; text: string; onClose: () => void }): React.ReactElement {
+    const ok = React.useRef<HTMLButtonElement | null>(null);
+    React.useEffect(() => ok.current?.focus(), []);
+    return (
+        <Modal title={title ?? "ExcelApp"} onClose={onClose}>
+            <p className="dialogMessage" data-testid="message-text">{text}</p>
+            <div className="dialogButtons">
+                <button type="button" ref={ok} onClick={onClose} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); onClose(); } }}>
+                    OK
+                </button>
+            </div>
+        </Modal>
+    );
+}
+
 export const Dialogs = {
+    Message: MessageBox,
     FilterMenu: real.FilterMenu ?? PlaceholderFilterMenu,
     SortDialog: real.SortDialog ?? PlaceholderSortDialog,
     FindReplace: real.FindReplace ?? PlaceholderFindReplace,

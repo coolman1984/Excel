@@ -11,12 +11,13 @@ export const MAX_BLOCKS = 400;
 
 export type CallFn = (cmd: string, args?: object) => Promise<any>;
 
-/** Decode one wire cell `[text, kind, align, color?, warn?, style?]`. */
+/** Decode one wire cell `[text, kind, align, color?, warn?, style?, formula?]`. */
 export function decodeCell(arr: any[]): CellData {
     const c: CellData = { text: String(arr[0] ?? ""), kind: (arr[1] ?? 0) as CellData["kind"], align: (arr[2] ?? 0) as CellData["align"] };
     if (arr[3] != null) c.color = String(arr[3]);
     if (arr[4]) c.warn = true;
     if (arr[5] != null) c.style = arr[5];
+    if (arr[6] != null) c.formula = String(arr[6]);
     return c;
 }
 

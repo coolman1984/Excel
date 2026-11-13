@@ -92,6 +92,23 @@ public static class InputParser
             }
         }
 
+        // A time on its own ("13:45", "9:30 PM", "8:05:10") is a fraction of a day, as Excel stores it, with a time format when General.
+        var tm = System.Text.RegularExpressions.Regex.Match(trimmed, @"^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?$");
+        if (tm.Success)
+        {
+            int h = int.Parse(tm.Groups[1].Value, CultureInfo.InvariantCulture), m = int.Parse(tm.Groups[2].Value, CultureInfo.InvariantCulture);
+            int s = tm.Groups[3].Success ? int.Parse(tm.Groups[3].Value, CultureInfo.InvariantCulture) : 0;
+            bool ampm = tm.Groups[4].Success;
+            if (ampm) { if (h < 1 || h > 12) h = -1; else h = h % 12 + (char.ToUpperInvariant(tm.Groups[4].Value[0]) == 'P' ? 12 : 0); }
+            if (h >= 0 && h < 24 && m < 60 && s < 60)
+            {
+                string code = ampm ? (tm.Groups[3].Success ? "h:mm:ss AM/PM" : "h:mm AM/PM") : (tm.Groups[3].Success ? "h:mm:ss" : "h:mm");
+                StyleDelta? style = general ? new StyleDelta(NumberFormat: code) : null;
+                if (style != null) impliedFormat = code;
+                return new CellEdit(EditKind.Number, Num: (h * 3600 + m * 60 + s) / 86400.0, Style: style);
+            }
+        }
+
         // A date the culture accepts becomes an Excel serial, with an implied date format when General.
         if (DateTime.TryParse(trimmed, culture, DateTimeStyles.None, out DateTime dt))
         {
@@ -123,6 +140,19 @@ public sealed class EditSet
         public readonly List<(int Row, int Col, CellEdit? Before, CellEdit? After)> Cells = new();
     }
 
+    /// <summary>Goes up on every change to the cell edits; formula results computed for an older version are stale.</summary>
+    public long Version { get; private set; }
+
+    /// <summary>True when any cell holds a formula edit.</summary>
+    public bool HasFormulas => _formulas > 0;
+    int _formulas;
+    void Track(CellEdit? before, CellEdit? after)
+    {
+        if (before?.Kind == EditKind.Formula) _formulas--;
+        if (after?.Kind == EditKind.Formula) _formulas++;
+        Version++;
+    }
+
     /// <summary>True when an edit, a width or a freeze change exists.</summary>
     public bool Dirty => _edits.Count > 0 || _colWidths.Count > 0 || _freeze.Count > 0;
     public bool CanUndo => _undo.Count > 0;
@@ -147,6 +177,7 @@ public sealed class EditSet
             _edits.TryGetValue(key, out CellEdit? before);
             if (Equals(before, after)) continue; // nothing changes; do not add to the record
             change.Cells.Add((row, col, before, after));
+            Track(before, after);
             if (after == null) _edits.Remove(key); else _edits[key] = after;
             changed.Add((row, col));
         }
@@ -167,8 +198,9 @@ public sealed class EditSet
         var changed = new List<(int Row, int Col)>(change.Cells.Count);
         for (int i = change.Cells.Count - 1; i >= 0; i--)
         {
-            var (row, col, before, _) = change.Cells[i];
+            var (row, col, before, after) = change.Cells[i];
             var key = (change.Sheet, row, col);
+            Track(after, before);
             if (before == null) _edits.Remove(key); else _edits[key] = before;
             changed.Add((row, col));
         }
@@ -183,9 +215,10 @@ public sealed class EditSet
         var change = _redo[_redo.Count - 1];
         _redo.RemoveAt(_redo.Count - 1);
         var changed = new List<(int Row, int Col)>(change.Cells.Count);
-        foreach (var (row, col, _, after) in change.Cells)
+        foreach (var (row, col, before, after) in change.Cells)
         {
             var key = (change.Sheet, row, col);
+            Track(before, after);
             if (after == null) _edits.Remove(key); else _edits[key] = after;
             changed.Add((row, col));
         }
@@ -203,6 +236,7 @@ public sealed class EditSet
     public void Clear()
     {
         _edits.Clear();
+        _formulas = 0; Version++;
         _colWidths.Clear();
         _freeze.Clear();
         _undo.Clear();

@@ -9,7 +9,12 @@ public readonly record struct FValue(ValueKind Kind, double Number = 0, string? 
     public static FValue Blank => new(ValueKind.Blank); public static FValue Unsupported => new(ValueKind.Unsupported);
     public static FValue Num(double n) => new(ValueKind.Number, n); public static FValue Str(string s) => new(ValueKind.Text, 0, s); public static FValue Bool(bool b) => new(ValueKind.Bool, b ? 1 : 0); public static FValue Error(string e) => new(ValueKind.Error, 0, e);
 }
-public interface IFormulaGrid { FValue Get(int sheet, int row, int col); int SheetIndex(string name); }
+public interface IFormulaGrid
+{
+    FValue Get(int sheet, int row, int col); int SheetIndex(string name);
+    /// <summary>Rows and columns that can hold values (0-based exclusive ends); whole-column ranges stop there.</summary>
+    (int Rows, int Cols) Extent(int sheet) => (1048576, 16384);
+}
 public abstract record Node;
 public sealed record Literal(FValue Value) : Node;
 public sealed record Reference(string? Sheet, int Row, int Col) : Node;

@@ -308,6 +308,127 @@ body {
     color: #666;
     padding: 0 4px;
 }
+.fxButton {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    font: inherit;
+    font-style: italic;
+    font-size: 13px;
+    cursor: pointer;
+    height: 22px;
+}
+.fxButton:hover {
+    background: var(--row-sel);
+    border-color: var(--green);
+}
+.formulaWrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+}
+.fnSuggest {
+    position: absolute;
+    top: 24px;
+    left: 0;
+    z-index: 50;
+    list-style: none;
+    margin: 0;
+    padding: 2px 0;
+    background: #fff;
+    border: 1px solid #c8c8c8;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    min-width: 320px;
+    max-width: 560px;
+    max-height: 280px;
+    overflow-y: auto;
+    font-size: 12px;
+}
+.fnSuggest li {
+    display: flex;
+    gap: 10px;
+    padding: 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.fnSuggest li.active,
+.fnSuggest li:hover {
+    background: var(--row-sel);
+}
+.fnName {
+    font-weight: 600;
+    min-width: 110px;
+}
+.fnDesc {
+    color: #555;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.fnHint {
+    position: absolute;
+    top: 24px;
+    left: 0;
+    z-index: 50;
+    background: #fffde7;
+    border: 1px solid #c8c8c8;
+    padding: 2px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+.fnHint .argNow {
+    font-weight: 700;
+}
+.insertFn {
+    width: 520px;
+    max-width: calc(100vw - 32px);
+}
+.ifRow {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+.ifRow input,
+.ifRow select {
+    font: inherit;
+    height: 26px;
+    padding: 0 6px;
+}
+.ifList {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    height: 180px;
+    overflow-y: auto;
+    border: 1px solid #ccc;
+    font-size: 13px;
+}
+.ifList li {
+    padding: 2px 8px;
+    cursor: default;
+}
+.ifList li.active {
+    background: var(--green);
+    color: #fff;
+}
+.ifDetail {
+    font-size: 12px;
+    min-height: 48px;
+    margin-bottom: 8px;
+}
+.ifDetail b {
+    display: block;
+    margin-bottom: 4px;
+    word-break: break-word;
+}
+.dialogMessage {
+    max-width: 420px;
+    margin: 4px 0 12px;
+    font-size: 13px;
+    line-height: 1.4;
+}
 .formulaBox {
     flex: 1;
     height: 22px;

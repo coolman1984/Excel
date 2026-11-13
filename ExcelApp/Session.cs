@@ -270,7 +270,7 @@ public sealed class Session : IDisposable
         if (!readers.TryGetValue(sheet, out var r)) readers[sheet] = r = new SheetReader(cache!, cache!.Sheets[sheet]);
         return r;
     }
-    void ReleaseReaders() { lock (readerLock) { foreach (var r in readers.Values) r.Dispose(); readers.Clear(); } foreach (var s in sheets) s.Source.Release(); }
+    void ReleaseReaders() { lock (readerLock) { foreach (var r in readers.Values) r.Dispose(); readers.Clear(); } foreach (var s in sheets) s.Source.Release(); cells?.Calc.Release(); }
 
     CacheData Need() => cache ?? throw new UserError("No file is open.");
     SheetState St(int sheet) { Need(); if (sheet < 0 || sheet >= sheets.Length) throw new UserError("That sheet does not exist."); return sheets[sheet]; }
@@ -453,7 +453,8 @@ public sealed class Session : IDisposable
     {
         var list = new List<int[]>(changed.Count);
         foreach (var (r, k) in changed) { int v = ToView(sheet, r); if (v >= 0) list.Add(new[] { v, k }); }
-        return new { sheet, changed = list, dirty = Dirty, canUndo = Edits.CanUndo, canRedo = Edits.CanRedo };
+        // recalc: formulas may show new results anywhere, so the interface reads the visible rows again.
+        return new { sheet, changed = list, dirty = Dirty, canUndo = Edits.CanUndo, canRedo = Edits.CanRedo, recalc = cells?.HasFormulas ?? false };
     }
 
     CellEdit KeepStyle(int sheet, int real, int col, CellEdit fresh)
@@ -465,6 +466,13 @@ public sealed class Session : IDisposable
     CellEdit Typed(int sheet, int real, int col, string input)
     {
         var parsed = InputParser.Parse(input, CultureInfo.CurrentCulture, cells!.CurrentFormat(sheet, real, col), cache!.Date1904, out _);
+        if (parsed.Kind == EditKind.Formula)
+        {
+            // As Excel does: close brackets left open, and refuse a formula that cannot be read.
+            string f = Formula.Calc.Complete(parsed.Formula!.Trim());
+            if (Formula.Calc.Problem(f) is string problem) throw new UserError(problem);
+            parsed = parsed with { Formula = f };
+        }
         return KeepStyle(sheet, real, col, parsed);
     }
 
@@ -555,8 +563,20 @@ public sealed class Session : IDisposable
         }
         ClipboardSet(text);
         pendingCut = cut ? (sheet, list.Select(x => (Real(st, x.R), x.C)).ToList(), Hash(text)) : null;
+        // Remember the formulas so a paste of this same text pastes formulas, as Excel does (one rectangle only).
+        copiedFormulas = null;
+        if (ranges.Count == 1)
+        {
+            var r0 = ranges[0]; var map = new Dictionary<(int, int), (string F, int Row, int Col)>();
+            foreach (var (vr, col) in list)
+                if (cells!.TryEdit(sheet, Real(st, vr), col, out var e) && e.Kind == EditKind.Formula)
+                    map[(vr - Math.Max(0, r0.R1), col - Math.Max(0, r0.C1))] = (e.Formula ?? "", Real(st, vr), col);
+            if (map.Count > 0) copiedFormulas = (Hash(text), map);
+        }
         return new { cells = list.Count };
     }
+
+    (string Hash, Dictionary<(int, int), (string F, int Row, int Col)> Map)? copiedFormulas;
 
     /// <summary>Splits clipboard text on tabs and line breaks; a quoted cell may hold both. The inverse of CopyText's quoting.</summary>
     public static List<List<string>> SplitClipboard(string text)
@@ -593,11 +613,20 @@ public sealed class Session : IDisposable
         var grid = SplitClipboard(text); long n = grid.Sum(r => (long)r.Count);
         if (n > MaxCells) throw new UserError($"Too much to paste. The limit is {MaxCells:N0} cells.");
         int vrows = ViewRows(c, st, sheet); var list = new List<(int, int, CellEdit?)>(); var seen = new HashSet<(int, int)>();
+        string hash = Hash(text);
+        var formulas = copiedFormulas is { } cf && cf.Hash == hash ? cf.Map : null;
+        bool moving = pendingCut is { } pc && pc.Sheet == sheet && pc.Hash == hash;
         for (int i = 0; i < grid.Count; i++)
             for (int k = 0; k < grid[i].Count; k++)
             {
                 int vr = row0 + i, col = col0 + k; if (vr >= vrows || col >= d.Cols) continue;
                 int real = Real(st, vr); seen.Add((real, col));
+                if (formulas != null && formulas.TryGetValue((i, k), out var src))
+                {
+                    string f = moving ? src.F : Formula.FormulaShift.Shift(src.F, real - src.Row, col - src.Col);
+                    list.Add((real, col, KeepStyle(sheet, real, col, new CellEdit(EditKind.Formula, Formula: f))));
+                    continue;
+                }
                 list.Add((real, col, Typed(sheet, real, col, grid[i][k])));
             }
         if (pendingCut is { } otherCut && otherCut.Sheet != sheet && otherCut.Hash == Hash(text))
@@ -617,9 +646,24 @@ public sealed class Session : IDisposable
         long n = (long)(Math.Min(dst.R2, vrows - 1) - Math.Max(dst.R1, 0) + 1) * (Math.Min(dst.C2, d.Cols - 1) - Math.Max(dst.C1, 0) + 1);
         if (n > MaxCells) throw new UserError($"Too many cells are selected. The limit is {MaxCells:N0} cells.");
         var list = new List<(int, int, CellEdit?)>();
+        // Filling down or up runs along rows; filling left or right runs along columns. Each line of the source makes its own series.
+        bool vertical = dst.C1 >= src.C1 && dst.C2 <= src.C2;
+        bool copyOnly = Arg.Bool(a, "copy");   // Ctrl+D and Ctrl+R copy exactly; the fill handle continues a series
+        var series = new Dictionary<int, FillSeries>();
         lock (readerLock)
         {
             var rd = Reader(sheet);
+            FillSeries Line(int line)
+            {
+                if (series.TryGetValue(line, out var fs)) return fs;
+                int n = vertical ? h : w; var items = new CellEdit?[n]; var formats = new string[n];
+                for (int i = 0; i < n; i++)
+                {
+                    int r = Real(st, vertical ? src.R1 + i : line), c = vertical ? line : src.C1 + i;
+                    items[i] = cells!.ValueEdit(sheet, rd, r, c); formats[i] = cells.CurrentFormat(sheet, r, c);
+                }
+                return series[line] = FillSeries.Of(items, formats);
+            }
             for (int vr = Math.Max(dst.R1, 0); vr <= Math.Min(dst.R2, vrows - 1); vr++)
                 for (int col = Math.Max(dst.C1, 0); col <= Math.Min(dst.C2, d.Cols - 1); col++)
                 {
@@ -627,12 +671,83 @@ public sealed class Session : IDisposable
                     int sr = src.R1 + (((vr - src.R1) % h) + h) % h, sc = src.C1 + (((col - src.C1) % w) + w) % w;
                     int realS = Real(st, sr), real = Real(st, vr);
                     var v = cells!.ValueEdit(sheet, rd, realS, sc) ?? new CellEdit(EditKind.Clear);
+                    if (v.Kind == EditKind.Formula) v = v with { Formula = Formula.FormulaShift.Shift(v.Formula ?? "", real - realS, col - sc) };
+                    else if (!copyOnly)
+                    {
+                        int t = vertical ? vr - src.R1 : col - src.C1;
+                        v = Line(vertical ? col : vr).At(t) ?? v;
+                    }
                     cells.TryEdit(sheet, realS, sc, out var srcEdit);
                     v = v with { Style = srcEdit?.Style };
                     list.Add((real, col, KeepStyle(sheet, real, col, v)));
                 }
         }
         return Mutate(sheet, st, list);
+    }
+
+    /// <summary>How Excel's fill handle continues a run of cells: numbers as a straight-line trend (two or more),
+    /// a single date by one day, text ending in a number by one, and day and month names in order.</summary>
+    sealed class FillSeries
+    {
+        Func<int, CellEdit?>? at;
+        public CellEdit? At(int t) => at?.Invoke(t);
+        static readonly string[][] Names =
+        {
+            CultureInfo.InvariantCulture.DateTimeFormat.DayNames, CultureInfo.InvariantCulture.DateTimeFormat.AbbreviatedDayNames,
+            CultureInfo.InvariantCulture.DateTimeFormat.MonthNames.Take(12).ToArray(), CultureInfo.InvariantCulture.DateTimeFormat.AbbreviatedMonthNames.Take(12).ToArray(),
+        };
+        static int Mod(int a, int n) => ((a % n) + n) % n;
+        static bool IsDate(string f) { string x = System.Text.RegularExpressions.Regex.Replace(f, "\"[^\"]*\"|\\[[^\\]]*\\]", ""); return x.IndexOfAny(new[] { 'd', 'D', 'y', 'Y' }) >= 0; }
+
+        public static FillSeries Of(CellEdit?[] items, string[] formats)
+        {
+            var s = new FillSeries(); int n = items.Length;
+            if (n == 0 || items.Any(x => x == null || x.Kind is EditKind.Formula or EditKind.Clear)) return s;
+            if (items.All(x => x!.Kind == EditKind.Number))
+            {
+                if (n == 1)
+                {
+                    if (!IsDate(formats[0])) return s;   // one plain number is copied, as in Excel
+                    double v0 = items[0]!.Num; s.at = t => new CellEdit(EditKind.Number, Num: v0 + t);
+                    return s;
+                }
+                double mx = (n - 1) / 2.0, my = items.Average(x => x!.Num), sxy = 0, sxx = 0;
+                for (int i = 0; i < n; i++) { sxy += (i - mx) * (items[i]!.Num - my); sxx += (i - mx) * (i - mx); }
+                double slope = sxx == 0 ? 0 : sxy / sxx, icept = my - slope * mx;
+                s.at = t => new CellEdit(EditKind.Number, Num: Cells.Excel15(icept + slope * t));
+                return s;
+            }
+            if (items.All(x => x!.Kind == EditKind.Text))
+            {
+                var texts = items.Select(x => x!.Text ?? "").ToArray();
+                foreach (var list in Names)
+                {
+                    int[] idx = texts.Select(t => Array.FindIndex(list, nm => string.Equals(nm, t, StringComparison.OrdinalIgnoreCase))).ToArray();
+                    if (idx.Any(i => i < 0)) continue;
+                    int step = n >= 2 ? idx[1] - idx[0] : 1;
+                    bool upper = texts[0].Length > 1 && texts[0] == texts[0].ToUpperInvariant(), lower = texts[0] == texts[0].ToLowerInvariant();
+                    s.at = t =>
+                    {
+                        string nm = list[Mod(idx[0] + step * t, list.Length)];
+                        return new CellEdit(EditKind.Text, Text: upper ? nm.ToUpperInvariant() : lower ? nm.ToLowerInvariant() : nm);
+                    };
+                    return s;
+                }
+                var parts = texts.Select(t => System.Text.RegularExpressions.Regex.Match(t, @"^(.*?)(\d+)$")).ToArray();
+                if (parts.All(m => m.Success))
+                {
+                    s.at = t =>
+                    {
+                        int k = Mod(t, n), cycle = (t - k) / n; var m = parts[k];
+                        string digits = m.Groups[2].Value; long num = long.Parse(digits, CultureInfo.InvariantCulture) + cycle;
+                        if (num < 0) return null;
+                        string shown = num.ToString(CultureInfo.InvariantCulture).PadLeft(digits.Length, '0');
+                        return new CellEdit(EditKind.Text, Text: m.Groups[1].Value + shown);
+                    };
+                }
+            }
+            return s;
+        }
     }
 
     // =====================================================================================
@@ -816,7 +931,10 @@ public sealed class Session : IDisposable
                     {
                         byte kind; double num = 0;
                         if (cells!.TryEdit(sheet, real, col, out var e) && !EditMarks.IsStyleOnly(e))
-                        { kind = e.Kind switch { EditKind.Clear => (byte)0, EditKind.Number => (byte)1, EditKind.Bool => (byte)3, _ => (byte)(string.IsNullOrEmpty(e.Kind == EditKind.Text ? e.Text : e.Formula) ? 0 : 2) }; num = e.Num; }
+                        {
+                            if (e.Kind == EditKind.Formula) (kind, num) = cells.FormulaValue(sheet, real, col, e.Formula ?? "");
+                            else { kind = e.Kind switch { EditKind.Clear => (byte)0, EditKind.Number => (byte)1, EditKind.Bool => (byte)3, _ => (byte)(string.IsNullOrEmpty(e.Text) ? 0 : 2) }; num = e.Num; }
+                        }
                         else
                         {
                             var ch = rd.Column(real, col); int i = real % d.BlockRows; kind = ch.KindAt(i);
