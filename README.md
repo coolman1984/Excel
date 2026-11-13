@@ -14,9 +14,9 @@ ExcelApp is a desktop editor that looks and behaves like Excel. A C# host opens 
 
 **Run it:** `ExcelApp\Start_ExcelApp.bat` (builds on first use with `ExcelApp\build.ps1`; needs Node with pnpm for the interface build and the .NET 8 SDK). Windows will show the app in `ExcelApp\app\`.
 
-**What it does:** open, scroll, select, type with Excel's rules (numbers, dates, percent, formulas as text), undo and redo, copy, cut, paste, fill, bold/italic/colour/number format, filter and sort one or many columns, find and replace, column widths, freeze panes, Save and Save As, close prompts, recent files.
+**What it does:** open, scroll, select, type with Excel's rules (numbers, dates, times, percent), formulas calculated live (about 170 functions; an unknown one shows #NAME?), undo and redo, copy, cut, paste, fill with Excel's series (numbers, dates, day and month names, "Item 1"), bold/italic/colour/number format with a Format Cells dialog (Ctrl+1), Excel's keyboard shortcuts (Ctrl+D/R, Ctrl+;, Alt+=, Ctrl+Shift+number formats), filter and sort one or many columns, find and replace, column widths, freeze panes, Save and Save As, close prompts, recent files.
 
-**What it does not do:** it does not calculate formulas (a formula you type is saved to Excel, which calculates it); no charts, pictures, pivot tables or macros; no editing of the first open's slow part: the first open of a file still waits for Excel to read it, later opens use the copy. .NET 8 runs out of support on 2026-11-10; moving to .NET 10 is a one-line change in the project files.
+**What it does not do:** formulas are saved to Excel as typed, and Excel's own result is what the saved file holds; no array formulas, charts, pictures, pivot tables or macros; no editing of the first open's slow part: the first open of a file still waits for Excel to read it, later opens use the copy. .NET 8 runs out of support on 2026-11-10; moving to .NET 10 is a one-line change in the project files.
 
 **Tests:** `powershell -File check.ps1` (add `-Offline` to skip the tests that start Excel).
 ## The rule

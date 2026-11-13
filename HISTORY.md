@@ -1,5 +1,10 @@
 # History
 
+## 2026-11-13
+
+- **Formulas calculate in the editor:** typed formulas show their results, recalculated on every edit, with about 170 functions; fill and paste move relative references.
+- **Finished and fixed:** the remaining Excel shortcuts work (Ctrl+D/R, Ctrl+; and Ctrl+Shift+;, Alt+=, Ctrl+Space/Shift+Space, Ctrl+Shift+number formats) and Ctrl+1 opens a new Format Cells dialog. Fixed: the fill handle repeated a value ("item-1, item-2" gave "item-2"); formulas with a left-out argument (=IF(A1,,1)) were refused; XLOOKUP's binary modes returned #VALUE!; a damaged stored table gave a raw error instead of a plain sentence; the Data pages squeezed their top bar on long pages and showed raw ISO times. The Data mode now loads when first opened.
+- **Checked on a Linux build machine without Excel or Windows:** every project compiles; the offline formula, fill, edit, filter, store, query and automation suites pass (364 checks); the interface passes its typecheck, 52 unit tests, the build and a browser walk-through of the new shortcuts and the Data pages. Still to run on the laptop: `check.ps1` live (host, save, style and journal suites, and the live Excel formula comparison).
 ## 2026-11-07
 
 - **The editor, planned:** the owner approved option A, a desktop app with a C# host and a WebView2 interface that looks like Excel, reads through Excel COM into the existing fast copy, filters and edits on the copy, and saves through Excel so files stay NASCA-protected. The complete one-shot build plan for an implementing agent is `docs\PLAN-3-EXCELAPP.md`. Nothing was built yet.
