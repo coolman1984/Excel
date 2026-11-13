@@ -1,5 +1,4 @@
 import * as React from "react";
-import { DataApp } from "./data/DataApp";
 import { call, on as onEvent, isMock } from "./bridge";
 import { PaintSignal } from "./paintSignal";
 import { resolveCommand } from "./keys";
@@ -24,6 +23,9 @@ function colFromLetters(s: string): number {
 }
 
 /** Column letters for a 1-based column number (1 -> "A"). */
+// The Data mode is loaded the first time it is opened, so the editor starts with a smaller bundle.
+const DataApp = React.lazy(() => import("./data/DataApp").then((m) => ({ default: m.DataApp })));
+
 function lettersFromCol(n: number): string {
     let s = "";
     while (n > 0) {
@@ -865,7 +867,7 @@ export function App(): React.ReactElement {
             )}
 
             </div>
-            {mode === "data" && <DataApp />}
+            {mode === "data" && <React.Suspense fallback={<div className="data-loading" role="status">Loading Data...</div>}><DataApp /></React.Suspense>}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>

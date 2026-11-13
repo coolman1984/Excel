@@ -83,6 +83,28 @@ public static class CalcTests
         Shift("=Data!A1+'My Sheet'!B2", 1, 1, "=Data!B2+'My Sheet'!C3"); Shift("=\"A1\"&A1", 1, 0, "=\"A1\"&A2"); Shift("=A1", -1, 0, "=#REF!"); Shift("=LOG10(A1)", 1, 0, "=LOG10(A2)");
         Shift("=ROUND(A1,2)", 0, 0, "=ROUND(A1,2)");
 
+        // ---- XLOOKUP binary search modes (2 ascending, -2 descending) on sorted data, and approximate match
+        Num("=XLOOKUP(3,A1:A5,C1:C5,,0,2)", 30); Num("=XLOOKUP(\"cherry\",B1:B5,C1:C5,,0,2)", 30);
+        Num("=XLOOKUP(4,A1:A5,C1:C5,,0,-2)", 40); Str("=XLOOKUP(9,A1:A5,B1:B5,\"none\",0,2)", "none");
+        Num("=XLOOKUP(3.5,A1:A5,C1:C5,,-1,2)", 30); Num("=XLOOKUP(3.5,A1:A5,C1:C5,,1,2)", 40);
+        Err("=XLOOKUP(3,A1:A5,C1:C5,,0,3)", "#VALUE!");
+        Err("=XLOOKUP(9,A1:A5,C1:C5,,0,)", "#N/A");
+
+        // ---- arguments left out between commas read as blank, as in Excel
+        Num("=IF(TRUE,,1)+5", 5); Num("=SUM(1,,2)", 3); Num("=ROUND(2.567,)", 3); Num("=VLOOKUP(3,A1:C5,3,)", 30);
+        check("problem: a left-out argument is not refused", Calc.Problem("=IF(A1,,1)") == null, Calc.Problem("=IF(A1,,1)") ?? "");
+
+        // ---- absolute references stay in the parsed formula
+        var abs = new Parser("=$B$2+B$3+$C4+D5").Parse();
+        var refs = new List<Reference>(); void Walk(Node nd) { if (nd is Reference rf) refs.Add(rf); else if (nd is Binary bn) { Walk(bn.Left); Walk(bn.Right); } }
+        Walk(abs);
+        check("parse: $ marks are kept on references", refs.Count == 4
+            && refs[0] is { AbsRow: true, AbsCol: true, Row: 1, Col: 1 } && refs[1] is { AbsRow: true, AbsCol: false }
+            && refs[2] is { AbsRow: false, AbsCol: true } && refs[3] is { AbsRow: false, AbsCol: false }, string.Join(";", refs));
+        var whole = new Parser("=SUM($A:B)").Parse() as Call;
+        check("parse: $ on a whole-column range is kept", whole?.Args[0] is ExcelApp.Formula.Range { Start.AbsCol: true, End.AbsCol: false }, "");
+        Num("=$A$1+A$2+$A3", 6);
+
         // ---- Excel's bracket rules on entry
         check("complete: a missing closing bracket is added", Calc.Complete("=SUM(A1:A3") == "=SUM(A1:A3)" && Calc.Complete("=IF(A1>0,ROUND(A1,2") == "=IF(A1>0,ROUND(A1,2))", "");
         check("problem: an extra closing bracket is refused", Calc.Problem("=SUM(1))") != null && Calc.Problem("=SUM(1)") == null, "");

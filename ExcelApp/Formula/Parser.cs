@@ -17,11 +17,14 @@ public interface IFormulaGrid
 }
 public abstract record Node;
 public sealed record Literal(FValue Value) : Node;
-public sealed record Reference(string? Sheet, int Row, int Col) : Node;
+/// <summary>A cell. AbsRow / AbsCol record the $ marks of the typed reference ($A$1).</summary>
+public sealed record Reference(string? Sheet, int Row, int Col, bool AbsRow = false, bool AbsCol = false) : Node;
 public sealed record Range(Reference Start, Reference End) : Node;
 public sealed record Unary(string Op, Node Value) : Node;
 public sealed record Binary(string Op, Node Left, Node Right) : Node;
 public sealed record Call(string Name, IReadOnlyList<Node> Args) : Node;
+/// <summary>An argument left out between commas, as in =IF(A1,,1) or =VLOOKUP(x,r,2,). It reads as blank.</summary>
+public sealed record Omitted : Node;
 public sealed record Token(string Kind, string Text);
 public static class Lexer
 {
@@ -53,14 +56,20 @@ public sealed class Parser
     Node Product() { var n = Power(); while (Current.Kind is "*" or "/") { string op = tokens[pos++].Kind; n = new Binary(op, n, Power()); } return n; }
     Node Power() { var n = Prefix(); while (Take("^")) n = new Binary("^", n, Prefix()); return n; }
     Node Prefix() { if (Take("-")) return new Unary("-", Prefix()); if (Take("+")) return Prefix(); var n = Primary(); while (Take("%")) n = new Unary("%", n); return n; }
-    static Reference Ref(string? sheet, string text) { var match = Regex.Match(text, @"^\$?([A-Za-z]{1,3})\$?(\d+)$"); if (!match.Success) throw new FormatException("Invalid cell reference."); int col = 0; foreach (char c in match.Groups[1].Value.ToUpperInvariant()) col = col * 26 + c - 'A' + 1; int row = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture); if (row < 1 || row > 1048576 || col > 16384) throw new FormatException("Invalid cell reference."); return new Reference(sheet, row - 1, col - 1); }
+    static Reference Ref(string? sheet, string text)
+    {
+        var match = Regex.Match(text, @"^(\$?)([A-Za-z]{1,3})(\$?)(\d+)$"); if (!match.Success) throw new FormatException("Invalid cell reference.");
+        int col = 0; foreach (char c in match.Groups[2].Value.ToUpperInvariant()) col = col * 26 + c - 'A' + 1;
+        if (!int.TryParse(match.Groups[4].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int row) || row < 1 || row > 1048576 || col > 16384) throw new FormatException("Invalid cell reference.");
+        return new Reference(sheet, row - 1, col - 1, match.Groups[3].Length > 0, match.Groups[1].Length > 0);
+    }
     Node Primary()
     {
         if (Take("(")) { var n = Compare(); Need(")"); return n; }
         if (Current.Kind == "number") return new Literal(FValue.Num(double.Parse(tokens[pos++].Text, CultureInfo.InvariantCulture)));
         if (Current.Kind == "string") return new Literal(FValue.Str(tokens[pos++].Text));
         if (Current.Kind != "name") throw new FormatException("Invalid formula."); string name = tokens[pos++].Text;
-        if (Take("(")) { var args = new List<Node>(); if (!Take(")")) { do { args.Add(Compare()); } while (Take(",")); Need(")"); } return new Call(name.ToUpperInvariant(), args); }
+        if (Take("(")) { var args = new List<Node>(); if (!Take(")")) { do { args.Add(Current.Kind is "," or ")" ? new Omitted() : Compare()); } while (Take(",")); Need(")"); } return new Call(name.ToUpperInvariant(), args); }
         if (name.Equals("TRUE", StringComparison.OrdinalIgnoreCase)) return new Literal(FValue.Bool(true)); if (name.Equals("FALSE", StringComparison.OrdinalIgnoreCase)) return new Literal(FValue.Bool(false)); if (name.StartsWith('#')) return new Literal(FValue.Error(name));
         string? sheet = null; if (Take("!")) { sheet = name; if (Current.Kind != "name") throw new FormatException("Invalid reference."); name = tokens[pos++].Text; }
         if (Regex.IsMatch(name, @"^\$?[A-Za-z]{1,3}$") && Take(":")) { string end = tokens[pos++].Text; var a = Ref(sheet, name + "1"); var b = Ref(sheet, end + "1048576"); return new Range(a, b); }
