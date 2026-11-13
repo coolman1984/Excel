@@ -56,9 +56,11 @@ public static class TableFile
         try { return OpenCore(root, relative); }
         catch (UserError) { throw; }
         catch (FileNotFoundException) { throw; } // preserve the missing committed-file distinction
-        catch (Exception e) when (e is IOException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException)
-        { throw new UserError("The stored table is damaged or could not be opened."); }
+        catch (Exception e) when (IsDamage(e)) { throw new UserError("The stored table is damaged or could not be opened."); }
     }
+    // InvalidDataException is not an IOException; every way a damaged file can fail to read must end as a plain sentence.
+    internal static bool IsDamage(Exception e) => e is IOException or InvalidDataException or JsonException or ArgumentException
+        or InvalidOperationException or KeyNotFoundException or FormatException or OverflowException;
     static LazyTable OpenCore(FileRoot root, string relative)
     {
         using var s = root.OpenRead(relative); using var r = new BinaryReader(s, Encoding.UTF8, true);
@@ -115,7 +117,12 @@ public sealed class LazyTable
             var result = new List<Column>();
             for (int i = 0; i < header.Columns.Count; i++) {
                 var col = header.Columns[i]; if (selected != null && !selected.Contains(col.Name)) continue;
-                if (!cache.TryGetValue(i, out var value)) cache[i] = value = TableFile.ReadColumn(root, path, header.Rows, col);
+                if (!cache.TryGetValue(i, out var value)) {
+                    try { value = TableFile.ReadColumn(root, path, header.Rows, col); }
+                    catch (FileNotFoundException) { throw; }
+                    catch (Exception e) when (TableFile.IsDamage(e)) { throw new UserError("The stored table is damaged or could not be opened."); }
+                    cache[i] = value;
+                }
                 result.Add(value);
             }
             return new Table(header.Name, result);

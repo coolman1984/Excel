@@ -145,4 +145,5 @@ export const Dialogs = {
     GoTo: real.GoTo ?? PlaceholderGoTo,
     SaveProgress: real.SaveProgress ?? PlaceholderSaveProgress,
     ClosePrompt: real.ClosePrompt ?? PlaceholderClosePrompt,
+    FormatCells: real.FormatCells,
 };

@@ -35,6 +35,7 @@ export interface RibbonProps {
     onDecrease: () => void;
 
     onAutoSum: () => void;
+    onFormatCells: () => void;
     onClearAll: () => void;
     onClearContents: () => void;
     onClearFormats: () => void;
@@ -300,7 +301,7 @@ function HomeTab(p: RibbonProps): React.ReactElement {
             <Group label="Cells">
                 <RButton label="Insert" disabled title="Insert cells - coming later" onClick={() => {}} />
                 <RButton label="Delete" disabled title="Delete cells - coming later" onClick={() => {}} />
-                <RButton label="Format" disabled title="Cell format - coming later" onClick={() => {}} />
+                <RButton label="Format" disabled={d} title="Format Cells (Ctrl+1)" onClick={p.onFormatCells} testid="btn-format-cells" />
             </Group>
 
             <Group label="Editing">
