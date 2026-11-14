@@ -3,7 +3,12 @@ using ExcelViewer.Core;
 
 namespace ExcelApp.Data.Query;
 
-public sealed class Tile { public string Id { get; set; } = ""; public string Title { get; set; } = ""; public QuerySpec Spec { get; set; } = new(); public string Measure { get; set; } = ""; public string Format { get; set; } = ""; public string? CompareTo { get; set; } }
+public sealed class Tile { public string Id { get; set; } = ""; public string Title { get; set; } = ""; public QuerySpec Spec { get; set; } = new(); public string Measure { get; set; } = ""; public string Format { get; set; } = ""; public string? CompareTo { get; set; }
+    // The dashboard designer: kind ("kpi", "chart" or "table"), the chart's type, a SQL query in place of Spec (the agent's SQL),
+    // and the tile's place on a 12-column grid (X, Y in cells; W, H in cells).
+    public string Kind { get; set; } = "kpi"; public string? ChartType { get; set; } public string? Sql { get; set; }
+    /// <summary>-1: not placed yet (older dashboards); the designer lays such tiles out in rows of four.</summary>
+    public int X { get; set; } = -1; public int Y { get; set; } = -1; public int W { get; set; } = 3; public int H { get; set; } = 2; }
 public sealed class Dashboard { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public List<Tile> Tiles { get; set; } = new(); }
 public sealed record LibrarySelection(string Kind, string Id);
 public sealed record LibraryLiteral(string Kind, string Id, string Field, object? Value);

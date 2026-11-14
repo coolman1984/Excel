@@ -10,3 +10,41 @@
 
 /* The top bar keeps its height; a long page scrolls inside the content area, never the whole window. */
 .data-main{min-height:0}.data-top{flex:none}.data-content{flex:1;min-height:0}
+
+/* Dashboard designer */
+.dash .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.dash-actions { display: flex; gap: 8px; align-items: center; }
+.dash-actions select { padding: 6px 8px; border: 1px solid #c8d7cb; border-radius: 6px; }
+.dash-actions button.primary, .dash-buttons .primary { background: #107c41; border-color: #107c41; color: #fff; }
+.dash-toolbar { display: flex; gap: 8px; align-items: center; margin: 4px 0 14px; padding: 8px 12px; background: #eef6f0; border: 1px dashed #9cc7aa; border-radius: 8px; }
+.dash-grid { display: grid; position: relative; }
+.dash-grid.designing { background-image: linear-gradient(#e3ebe5 1px, transparent 1px); background-size: 100% 98px; border-radius: 8px; }
+.dash-tile { position: relative; display: flex; flex-direction: column; background: #fff; border: 1px solid #e1e8e3; border-radius: 12px; box-shadow: 0 1px 2px rgba(16, 60, 35, 0.06), 0 6px 18px rgba(16, 60, 35, 0.06); padding: 12px 14px; min-width: 0; overflow: hidden; }
+.dash-grid.designing .dash-tile { cursor: move; outline: 2px dashed transparent; }
+.dash-grid.designing .dash-tile:hover { outline-color: #9cc7aa; }
+.dash-tile header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.dash-tile h2 { flex: 1; min-width: 0; margin: 0; font-size: 13px; font-weight: 600; color: #42594a; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dash-tile header button { border: none; background: #f1f5f2; border-radius: 5px; padding: 2px 7px; cursor: pointer; color: #355442; }
+.dash-tile-body { flex: 1; min-height: 0; overflow: hidden; }
+.dash-kpi { display: flex; align-items: baseline; gap: 10px; height: 100%; }
+.dash-kpi-value { font-size: 34px; font-weight: 700; color: #102a1b; letter-spacing: -0.02em; line-height: 1.1; }
+.dash-delta { font-size: 13px; font-weight: 600; }
+.dash-delta.up { color: #0f7a3a; } .dash-delta.down { color: #b42318; }
+.dash-table { height: 100%; overflow: auto; }
+.dash-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.dash-table th { position: sticky; top: 0; background: #f6f8f6; text-align: left; font-weight: 600; color: #42594a; padding: 4px 8px; }
+.dash-table td { padding: 4px 8px; border-bottom: 1px solid #eef2ef; } .dash-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dash-muted { color: #7a857d; font-size: 12px; }
+.dash-error { color: #b42318; font-size: 12px; }
+.dash-resize { position: absolute; right: 2px; bottom: 2px; width: 14px; height: 14px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #9cc7aa 50%); border-bottom-right-radius: 10px; }
+.dash-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.2); display: grid; place-items: center; z-index: 2000; }
+.dash-modal-box { width: min(560px, 92vw); background: #fff; border-radius: 12px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25); padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.dash-modal-box h2 { margin: 0 0 4px; font-size: 17px; }
+.dash-modal-box label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #42594a; }
+.dash-modal-box input, .dash-modal-box select, .dash-modal-box textarea { font: inherit; padding: 7px 9px; border: 1px solid #c8d7cb; border-radius: 6px; }
+.dash-modal-box textarea { font-family: Consolas, monospace; font-size: 12px; }
+.dash-row { display: flex; gap: 12px; align-items: flex-end; }
+.dash-buttons button { padding: 7px 14px; border-radius: 6px; border: 1px solid #c8d7cb; background: #fff; cursor: pointer; }
+.dash-buttons .danger { color: #b42318; border-color: #e7b4ae; }
+/* charts size themselves: the small-chart rule above is for the Data pages' sparklines only */
+.data-content .chartSvgWrap svg { width: auto; max-width: none; height: auto; }

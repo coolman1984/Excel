@@ -4,7 +4,8 @@ using ExcelViewer.Core;
 
 namespace ExcelApp.Data.Query;
 
-public sealed record TileValue(string TileId, double? Value, string Text, double? Previous, double? DeltaPct, DateTime AsOf, string? Error = null);
+/// <summary>Data: the rows of a chart or table tile (columns and up to a few hundred rows).</summary>
+public sealed record TileValue(string TileId, double? Value, string Text, double? Previous, double? DeltaPct, DateTime AsOf, string? Error = null, ExcelApp.Data.Agent.AgentResult? Data = null);
 public sealed class Dashboards : IDisposable
 {
     readonly DataServices services; readonly object gate = new(); readonly Dictionary<string, IReadOnlyList<TileValue>> cache = new();
@@ -40,10 +41,29 @@ public sealed class Dashboards : IDisposable
     {
         var now = DateTime.Now; var values = new List<TileValue>(); foreach (var tile in Get(id).Tiles)
         {
+            if (tile.Sql != null || tile.Kind is "chart" or "table")
+            {
+                try { values.Add(Designed(tile, now)); }
+                catch (UserError e) { values.Add(new TileValue(tile.Id, null, "", null, null, now, e.Message)); }
+                catch (Exception) { values.Add(new TileValue(tile.Id, null, "", null, null, now, "This tile could not be calculated.")); }
+                continue;
+            }
             try { double? value = Scalar(tile.Spec, tile.Measure), previous = tile.CompareTo == null ? null : Scalar(Previous(tile, now), tile.Measure); double? delta = previous == null || previous == 0 || value == null ? null : (value - previous) / Math.Abs(previous.Value) * 100; values.Add(new TileValue(tile.Id, value, value?.ToString("G15", CultureInfo.InvariantCulture) ?? "", previous, delta, now)); }
             catch (Exception) { values.Add(new TileValue(tile.Id, null, "", null, null, now, "This tile could not be calculated.")); }
         }
         lock (gate) cache[id] = values; return values;
+    }
+    /// <summary>A designer tile: a KPI from a SQL query (its first number, or its row count), or a chart or table of its rows.</summary>
+    TileValue Designed(Tile tile, DateTime now)
+    {
+        var agent = new ExcelApp.Data.Agent.AgentData(services.Tables);
+        ExcelApp.Data.Agent.AgentResult r = tile.Sql != null
+            ? agent.Query(tile.Sql, tile.Kind == "kpi" ? 1 : tile.Kind == "table" ? 200 : 500)
+            : ExcelApp.Data.Agent.AgentData.FromTable(Engine.Run(tile.Spec, services.Tables, CancellationToken.None));
+        if (tile.Kind != "kpi") return new TileValue(tile.Id, null, "", null, null, now, null, r);
+        double? value = r.Rows.Count > 0 ? r.Rows[0].OfType<double>().Cast<double?>().FirstOrDefault() : null;
+        value ??= r.RowCount;
+        return new TileValue(tile.Id, value, value.Value.ToString("G15", CultureInfo.InvariantCulture), null, null, now);
     }
     public void Dispose() { if (services.Ingestion != null) services.Ingestion.Loaded -= Loaded; }
 }

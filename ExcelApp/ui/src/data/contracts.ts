@@ -73,9 +73,12 @@ export interface PackSheet { spec?: QuerySpec; viewId?: string; sheet: string; s
 /** kind "pack": "sheets" lists the sheets of one workbook and "export" gives its target and template (export.sheet/startCell unused). */
 export interface RecipeStep { kind: "query" | "export" | "pack"; spec?: QuerySpec; viewId?: string; export?: { target: string; template?: string; sheet: string; startCell: string }; sheets?: PackSheet[] }
 export interface ReportRecipe { id: string; name: string; steps: RecipeStep[]; schedule?: { kind: "daily" | "weekly" | "monthly" | "afterLoad"; time?: string; day?: number; reportType?: string }; enabled: boolean }
-export interface Tile { id: string; title: string; spec: QuerySpec; measure: string; format: string; compareTo?: "previousPeriod" | "previousVersion" }
+export interface Tile { id: string; title: string; spec: QuerySpec; measure: string; format: string; compareTo?: "previousPeriod" | "previousVersion";
+    /** The dashboard designer: kind, chart type, a SQL query in place of spec, and the place on a 12-column grid. */
+    kind?: "kpi" | "chart" | "table"; chartType?: string | null; sql?: string | null; x?: number; y?: number; w?: number; h?: number }
+export interface TileData { columns: { name: string; type: string }[]; rows: (string | number | boolean | null)[][]; rowCount: number; truncated: boolean }
 export interface Dashboard { id: string; name: string; tiles: Tile[] }
-export interface TileValue { tileId: string; value: number | null; text: string; previous?: number | null; deltaPct?: number | null; asOf: string; error?: string }
+export interface TileValue { tileId: string; value: number | null; text: string; previous?: number | null; deltaPct?: number | null; asOf: string; error?: string; data?: TileData | null }
 export interface Sandbox { id: string; name: string; base: TableRef; edits: number; createdAt: string }
 export interface LineageCell { file: string; sheet: string; cell: string; version: number; loadedAt: string; value: string }
 export interface Question { text: string; spec?: QuerySpec; pattern?: string; explanation: string; ok: boolean }
