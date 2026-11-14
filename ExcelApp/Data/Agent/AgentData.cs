@@ -70,6 +70,15 @@ public sealed class AgentData
         return new AgentResult(shown.Select((o, k) => new AgentColumn(o.Shown, TypeName(cols[k].Type))).ToArray(), rows, count, count > rows.Count, sw.ElapsedMilliseconds);
     }
 
+    /// <summary>A whole engine result as agent rows (lineage columns hidden), for dashboard tiles defined by a query spec.</summary>
+    public static AgentResult FromTable(QueryResult result, int maxRows = 500)
+    {
+        var t = result.Table; var cols = t.Columns.Where(c => !c.Name.StartsWith('_')).ToArray(); int n = Math.Min(t.Rows, maxRows);
+        var rows = new List<object?[]>(n);
+        for (int r = 0; r < n; r++) rows.Add(cols.Select(c => Value(c, r)).ToArray());
+        return new AgentResult(cols.Select(c => new AgentColumn(c.Name, TypeName(c.Type))).ToArray(), rows, Math.Max(t.Rows, result.Total), t.Rows > n, 0);
+    }
+
     static object? Value(Column c, int r)
     {
         if (c.IsNull(r)) return null;

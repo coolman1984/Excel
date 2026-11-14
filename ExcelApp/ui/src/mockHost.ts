@@ -124,6 +124,89 @@ export class MockHost {
         return () => set!.delete(handler);
     }
 
+    private charts: { id: string; sheet: number; type: string; title: string | null; r1: number; c1: number; r2: number; c2: number; x: number; y: number; w: number; h: number }[] = [];
+    private chartSeq = 0;
+    /** The chart's points from the mock cells: a text header row names the series, a text first column holds the categories. */
+    private chartWire(c: { id: string; sheet: number; type: string; title: string | null; r1: number; c1: number; r2: number; c2: number; x: number; y: number; w: number; h: number }): any {
+        const cell = (r: number, k: number) => this.cellAt(r, k);
+        const header = c.r2 > c.r1 && cell(c.r1, c.c2).kind !== 1;
+        const top = header ? c.r1 + 1 : c.r1;
+        const catCol = c.c2 > c.c1 && Array.from({ length: c.r2 - top + 1 }, (_, i) => cell(top + i, c.c1)).every((x) => x.kind !== 1);
+        const first = catCol ? c.c1 + 1 : c.c1;
+        const n = Math.min(1000, c.r2 - top + 1);
+        const categories = Array.from({ length: n }, (_, i) => (catCol ? cell(top + i, c.c1).text : String(i + 1)));
+        const series = [];
+        for (let k = first; k <= c.c2 && series.length < 8; k++)
+            series.push({ name: header ? cell(c.r1, k).text || `Series ${series.length + 1}` : `Series ${series.length + 1}`, values: Array.from({ length: n }, (_, i) => { const v = cell(top + i, k); const num = parseFloat(String(v.text).replace(/[$,%]/g, "")); return v.kind === 1 && isFinite(num) ? num : null; }) });
+        return { ...c, range: `${this.letter(c.c1)}${c.r1 + 1}:${this.letter(c.c2)}${c.r2 + 1}`, categories, series, xValues: null, truncated: false };
+    }
+
+    /** Inserts or deletes rows or columns of the current sheet (the browser preview; the real work is in the C# host). */
+    private restructure(args: any, rows: boolean, insert: boolean): any {
+        const s = this.sheets[args.sheet ?? this.current];
+        const at = rows ? args.row : args.col, n = Math.max(1, args.count ?? 1);
+        const size = rows ? s.rows : s.cols;
+        if (insert ? at < 0 || at > size : at < 0 || at + n > size) throw new Error("Those cells are outside the sheet.");
+        if (!insert && n >= size) throw new Error(`A sheet keeps at least one ${rows ? "row" : "column"}.`);
+        const blank = (): CellData => ({ text: "", kind: 0, align: 0 });
+        if (rows) {
+            if (insert) s.base.splice(at, 0, ...Array.from({ length: n }, () => Array.from({ length: s.cols }, blank)));
+            else s.base.splice(at, n);
+            s.rows = s.base.length;
+        } else {
+            for (const row of s.base) { if (insert) row.splice(at, 0, ...Array.from({ length: n }, blank)); else row.splice(at, n); }
+            s.cols += insert ? n : -n;
+        }
+        const move = (v: number) => (insert ? (v >= at ? v + n : v) : v < at ? v : v >= at + n ? v - n : -1);
+        const shift = <T,>(m: Map<string, T>) => {
+            const out = new Map<string, T>();
+            for (const [k, v] of m) { const [r, c] = k.split(",").map(Number); const r2 = rows ? move(r) : r, c2 = rows ? c : move(c); if (r2 >= 0 && c2 >= 0) out.set(this.keyFor(r2, c2), v); }
+            return out;
+        };
+        this.valueEdits = shift(this.valueEdits); this.styleEdits = shift(this.styleEdits);
+        this.filters.clear(); this.sortKeys = []; this.viewCache = null; this.undoStack = []; this.redoStack = []; this.dirty = true;
+        return { sheet: args.sheet ?? this.current, structure: true, rows: s.rows, cols: s.cols, viewRows: s.rows, dirty: true, canUndo: false, canRedo: false };
+    }
+
+    // ---- PivotTables for the browser preview (the real work is the C# host on the Data engine)
+    private pivotData(args: any): { names: string[]; rows: CellData[][]; r1: number; c1: number; c2: number } {
+        let [r1, c1, r2, c2] = args.range as number[];
+        if (r1 === r2 && c1 === c2) { r1 = 0; c1 = 0; r2 = 50; c2 = 6; }
+        const names = []; for (let c = c1; c <= c2; c++) names.push(this.cellAt(r1, c).text || "Column " + this.letter(c));
+        const rows = []; for (let r = r1 + 1; r <= r2; r++) { const row = []; for (let c = c1; c <= c2; c++) row.push(this.cellAt(r, c)); rows.push(row); }
+        return { names, rows, r1, c1, c2 };
+    }
+    private num(v: CellData): number | null { const n = parseFloat(String(v.text).replace(/[$,%]/g, "")); return v.kind === 1 && isFinite(n) ? n : null; }
+    private pivotFields(args: any): any {
+        const d = this.pivotData(args);
+        return { range: "", rows: d.rows.length, fields: d.names.map((name, i) => ({ name, type: d.rows.filter((r) => this.num(r[i]) != null).length >= d.rows.length * 0.8 ? "number" : "text" })) };
+    }
+    private pivotRun(args: any): any {
+        const d = this.pivotData(args); const idx = (n: string) => d.names.indexOf(n);
+        const agg = (rows: CellData[][], v: { field: string; fn: string }) => {
+            const xs = rows.map((r) => r[idx(v.field)]).filter((c) => c.kind !== 0); const ns = xs.map((c) => this.num(c)).filter((n): n is number => n != null);
+            if (v.fn === "count") return xs.length; if (!ns.length) return null;
+            return v.fn === "sum" ? ns.reduce((a, b) => a + b, 0) : v.fn === "avg" ? ns.reduce((a, b) => a + b, 0) / ns.length : v.fn === "min" ? Math.min(...ns) : Math.max(...ns);
+        };
+        const key = (r: CellData[], fs: string[]) => fs.map((f) => r[idx(f)].text || "(blank)");
+        const groups = new Map<string, CellData[][]>();
+        for (const r of d.rows) { const k = key(r, args.rows).join("\u0001"); (groups.get(k) ?? groups.set(k, []).get(k)!).push(r); }
+        const colKeys = args.column ? [...new Set(d.rows.map((r) => r[idx(args.column)].text || "(blank)"))].sort() : [];
+        const cellsFor = (rs: CellData[][]) => (args.column ? colKeys.map((k) => args.values.map((v: any) => { const sub = rs.filter((r) => (r[idx(args.column)].text || "(blank)") === k); return sub.length ? agg(sub, v) : null; })) : [args.values.map((v: any) => agg(rs, v))]);
+        const rows = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([k, rs]) => ({ keys: k.split("\u0001"), cells: cellsFor(rs), total: args.values.map((v: any) => agg(rs, v)) }));
+        const labels = args.values.map((v: any) => ({ sum: "Sum of ", count: "Count of ", avg: "Average of ", min: "Min of ", max: "Max of " } as any)[v.fn] + v.field);
+        return { range: "", rowFields: args.rows, columnField: args.column ?? null, valueLabels: labels, columnKeys: colKeys, rows, columnTotals: cellsFor(d.rows), grand: args.values.map((v: any) => agg(d.rows, v)), truncated: false };
+    }
+    private pivotPlace(args: any): any {
+        const p = this.pivotRun(args), d = this.pivotData(args); const left = d.c2 + 2;
+        const lines: (string | number | null)[][] = [[...(p.rowFields.length ? p.rowFields : [""]), ...p.valueLabels]];
+        for (const r of p.rows) lines.push([...r.keys, ...r.total]);
+        lines.push(["Grand Total", ...p.rowFields.slice(1).map(() => null), ...p.grand]);
+        lines.forEach((line, i) => line.forEach((v, j) => this.valueEdits.set(this.keyFor(d.r1 + i, left + j), v == null ? { text: "", kind: 0, align: 0 } : typeof v === "number" ? { text: String(+v.toFixed(2)), kind: 1, align: 1 } : { text: v, kind: 2, align: 0, style: i === 0 || v === "Grand Total" ? { bold: true } : undefined })));
+        this.dirty = true;
+        return { placed: `${this.letter(left)}${d.r1 + 1}:${this.letter(left + lines[0].length - 1)}${d.r1 + lines.length}`, structure: false, dirty: true };
+    }
+
     // A pretend Claude Code for the browser preview: it reads two cells, writes one and answers.
     private agentTimers: ReturnType<typeof setTimeout>[] = [];
     private agentStart(args: any): any {
@@ -425,6 +508,27 @@ export class MockHost {
             case "openExternal":
             case "log":
                 return { ok: true };
+            case "insertRows": return this.restructure(args, true, true);
+            case "deleteRows": return this.restructure(args, true, false);
+            case "insertCols": return this.restructure(args, false, true);
+            case "deleteCols": return this.restructure(args, false, false);
+            case "chart.list": return { charts: this.charts.filter((c) => args.sheet == null || c.sheet === args.sheet).map((c) => this.chartWire(c)) };
+            case "chart.add": {
+                const [r1, c1, r2, c2] = args.range;
+                if (r1 === r2 && c1 === c2) throw new Error("Select the data to chart: a header row and the numbers below it, such as A1:C13.");
+                const c = { id: "c" + (++this.chartSeq), sheet: args.sheet ?? this.current, type: args.type ?? "column", title: args.title ?? null, r1: Math.min(r1, r2), c1: Math.min(c1, c2), r2: Math.max(r1, r2), c2: Math.max(c1, c2), x: 120 + 28 * this.charts.length, y: 90 + 28 * this.charts.length, w: 520, h: 320 };
+                this.charts.push(c); this.dirty = true;
+                return { chart: this.chartWire(c), dirty: true };
+            }
+            case "chart.update": {
+                const c = this.charts.find((x) => x.id === args.id); if (!c) throw new Error("That chart does not exist any more.");
+                for (const k of ["type", "title", "x", "y", "w", "h"]) if (k in args) (c as any)[k] = args[k];
+                this.dirty = true; return { chart: this.chartWire(c), dirty: true };
+            }
+            case "chart.delete": this.charts = this.charts.filter((x) => x.id !== args.id); this.dirty = true; return { deleted: args.id, dirty: true };
+            case "pivot.fields": return this.pivotFields(args);
+            case "pivot.run": return this.pivotRun(args);
+            case "pivot.place": return this.pivotPlace(args);
             case "agent.status":
                 return { claude: true, codex: false, running: this.agentTimers.length > 0 ? "claude" : null };
             case "agent.start":

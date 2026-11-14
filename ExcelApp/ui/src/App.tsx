@@ -12,6 +12,8 @@ import { Dialogs } from "./dialogHost";
 import { increaseDecimals, decreaseDecimals, PERCENT_CODE, COMMA_CODE, GENERAL } from "./numberFormat";
 import { SHORTCUT_FORMATS, fillRange, todayInput, timeInput } from "./shortcuts";
 import { AgentPanel } from "./agent/AgentPanel";
+import { ChartLayer, type ChartWire } from "./charts/ChartLayer";
+import { PivotPanel } from "./pivot/PivotPanel";
 import type { WorkbookInfo, SheetInfo, Stats, CellStyle, Condition, SortKey } from "./types";
 
 type AppState = "empty" | "opening" | "ready";
@@ -96,14 +98,23 @@ export function App(): React.ReactElement {
     const sheetRef = React.useRef(0);
     sheetRef.current = sheetIndex;
     const [agentOpen, setAgentOpen] = React.useState(false);
+    const [pivotRange, setPivotRange] = React.useState<number[] | null>(null);
+    // Charts of the current sheet, read again after anything that can change their numbers or cards
+    const [charts, setCharts] = React.useState<ChartWire[]>([]);
+    const chartsFor = React.useRef({ state: "", sheet: 0 });
+    const loadCharts = React.useCallback(async () => {
+        const { state: st, sheet: sh } = chartsFor.current;
+        if (st !== "ready") { setCharts([]); return; }
+        try { const r: any = await call("chart.list", { sheet: sh }); setCharts(r?.charts ?? []); } catch { setCharts([]); }
+    }, []);
 
     React.useEffect(() => {
         const offs: (() => void)[] = [];
-        // An AI agent changed the workbook through ExcelApp's MCP tools: read the sheet, the visible cells and the saved state again.
+        // An AI agent changed the workbook through ExcelApp's MCP tools: read the sheets (sizes may change), the cells and the saved state again.
         offs.push(onEvent("agentChanged", () => {
+            call<any>("workbook").then((w) => { if (w?.sheets) setWorkbook(w); setDirty(!!w?.dirty); }).catch(() => {});
             void loadSheet(sheetRef.current).catch(() => {});
             gridRef.current?.refresh();
-            call<any>("workbook").then((w) => setDirty(!!w?.dirty)).catch(() => {});
         }));
         offs.push(
             onEvent("opening", (e) => {
@@ -230,11 +241,12 @@ export function App(): React.ReactElement {
     const refreshView = React.useCallback(() => setViewKey((k) => k + 1), []);
 
     const applyChanged = React.useCallback((res: { changed?: number[][]; recalc?: boolean } | null | undefined) => {
+        void loadCharts();
         // With formulas on the sheet any cell can show a new result, so read the visible rows again.
         if (res?.recalc) { gridRef.current?.refresh(); return; }
         const changed = res?.changed;
         if (changed && changed.length > 0) gridRef.current?.invalidateCells(changed);
-    }, []);
+    }, [loadCharts]);
 
     const confirmLeave = React.useCallback((next: () => Promise<void>) => {
         if (!live.current.dirty) { void next().catch((e: Error) => setStatus(e.message)); return; }
@@ -381,21 +393,63 @@ export function App(): React.ReactElement {
         setDirty(true);
     }, [sheet, sheetIndex, activeCell, refreshView]);
 
+    /** After rows or columns were inserted or deleted (or that was undone): the sheet's size and widths change, so read it all again. */
+    const reloadStructure = React.useCallback(async (index: number) => {
+        const wb: any = await call("workbook");
+        if (wb?.sheets) setWorkbook(wb);
+        setDirty(!!wb?.dirty);
+        await loadSheet(index);
+        gridRef.current?.refresh();
+    }, [loadSheet]);
+
     const doUndo = React.useCallback(async () => {
         if (!sheet) return;
         const r: any = await call("undo", { sheet: sheetIndex });
         setDirty(!!r.dirty);
         if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
+        if (r.structure) await reloadStructure(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView, selectSheet]);
+    }, [sheet, sheetIndex, refreshView, selectSheet, reloadStructure]);
+
+    chartsFor.current = { state, sheet: sheetIndex };
+    React.useEffect(() => { void loadCharts(); }, [loadCharts, state, sheetIndex, viewKey]);
+
+    const addChart = React.useCallback(async (type: string) => {
+        if (!sheet) return;
+        try {
+            await call("chart.add", { sheet: sheetIndex, type, range: [selection.r1, selection.c1, selection.r2, selection.c2] });
+            await loadCharts();
+            setStatus("Chart added");
+        } catch (e: any) {
+            setDialog({ name: "Message", props: { title: "Microsoft Excel", text: e?.message ?? String(e), onClose: () => setDialog(null) } });
+        }
+    }, [sheet, sheetIndex, selection, loadCharts]);
+
+    const doStructure = React.useCallback(async (kind: "insertRows" | "insertCols" | "deleteRows" | "deleteCols") => {
+        if (!sheet) return;
+        const rows = kind.endsWith("Rows");
+        const args = rows
+            ? { sheet: sheetIndex, row: selection.r1, count: selection.r2 - selection.r1 + 1 }
+            : { sheet: sheetIndex, col: selection.c1, count: selection.c2 - selection.c1 + 1 };
+        try {
+            await call(kind, args);
+            await reloadStructure(sheetIndex);
+            const n = args.count, what = rows ? (n === 1 ? "row" : "rows") : (n === 1 ? "column" : "columns");
+            setStatus(`${kind.startsWith("insert") ? "Inserted" : "Deleted"} ${n.toLocaleString()} ${what}`);
+        } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            setDialog({ name: "Message", props: { title: "Microsoft Excel", text: msg, onClose: () => setDialog(null) } });
+        }
+    }, [sheet, sheetIndex, selection, reloadStructure]);
 
     const doRedo = React.useCallback(async () => {
         if (!sheet) return;
         const r: any = await call("redo", { sheet: sheetIndex });
         setDirty(!!r.dirty);
         if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
+        if (r.structure) await reloadStructure(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView, selectSheet]);
+    }, [sheet, sheetIndex, refreshView, selectSheet, reloadStructure]);
 
     const toggleBold = React.useCallback(() => {
         const v = !fmtFlags.bold;
@@ -627,6 +681,13 @@ export function App(): React.ReactElement {
                 case "insertTime": if (sheet) void commitCell(activeCell.row, activeCell.col, timeInput(new Date())); return true;
                 case "autoSum": onAutoSum(); return true;
                 case "formatCells": onFormatCells(); return true;
+                case "insertCells":
+                case "deleteCells": {
+                    // Excel: whole columns selected -> columns; otherwise rows
+                    const wholeCols = sheet != null && selection.r1 === 0 && selection.r2 >= viewRows - 1 && viewRows > 1;
+                    void doStructure(cmd === "insertCells" ? (wholeCols ? "insertCols" : "insertRows") : (wholeCols ? "deleteCols" : "deleteRows"));
+                    return true;
+                }
                 case "selectColumn": if (sheet) gridRef.current?.setSelection(0, selection.c1, Math.max(0, viewRows - 1), selection.c2); return true;
                 case "selectRow": if (sheet) gridRef.current?.setSelection(selection.r1, 0, selection.r2, Math.max(0, sheet.cols - 1)); return true;
                 case "edgeUp":
@@ -643,7 +704,7 @@ export function App(): React.ReactElement {
                     return false;
             }
         },
-        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge, selection, doFill, commitCell, onAutoSum, onFormatCells, onNumberFormat]
+        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge, selection, doFill, commitCell, onAutoSum, onFormatCells, onNumberFormat, doStructure]
     );
 
     const dispatchRef = React.useRef(dispatch);
@@ -747,6 +808,9 @@ export function App(): React.ReactElement {
                 onDecrease={onDecrease}
                 onAutoSum={onAutoSum}
                 onFormatCells={onFormatCells}
+                onStructure={(k) => void doStructure(k)}
+                onChart={(t) => void addChart(t)}
+                onPivot={() => { setAgentOpen(false); setPivotRange([selection.r1, selection.c1, selection.r2, selection.c2]); }}
                 onClearAll={onClearAll}
                 onClearContents={onClearContents}
                 onClearFormats={onClearFormats}
@@ -842,6 +906,7 @@ export function App(): React.ReactElement {
                             onPaint={handlePaint}
                             viewKey={viewKey}
                         />
+                        <ChartLayer charts={charts} onChanged={() => void loadCharts()} />
                     </div>
                     <SheetTabs sheets={workbook?.sheets ?? []} activeIndex={sheetIndex} onSelect={selectSheet} onUnhide={selectSheet} />
                     <StatusBar status={status} filterInfo={filterInfo} stats={stats} zoom={zoom} onZoom={setZoomPct} />
@@ -883,6 +948,10 @@ export function App(): React.ReactElement {
             </div>
             {mode === "data" && <React.Suspense fallback={<div className="data-loading" role="status">Loading Data...</div>}><DataApp /></React.Suspense>}
             {agentOpen && <AgentPanel onClose={() => setAgentOpen(false)} />}
+            {pivotRange && state === "ready" && (
+                <PivotPanel sheet={sheetIndex} range={pivotRange} onClose={() => setPivotRange(null)}
+                    onPlaced={(where) => { setPivotRange(null); void reloadStructure(sheetIndex).then(() => { void loadCharts(); setStatus(`PivotTable placed in ${where}`); }); }} />
+            )}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>

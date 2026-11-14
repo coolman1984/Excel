@@ -53,6 +53,10 @@ public sealed class McpServer
             "clearCells {sheet, ranges, what:\"contents|formats|all\"}; fill {sheet, from:[r1,c1,r2,c2], to:[r1,c1,r2,c2], copy}; " +
             "setFilter {sheet, col, condition:{kind:\"values\", include:[...], blanks} or {kind:\"number\", op:\"gt|ge|lt|le|eq|ne|between\", a, b} or {kind:\"text\", op:\"contains|begins|ends|eq|ne\", value}}; clearFilters {sheet}; " +
             "setSort {sheet, keys:[{col, desc}]}; find {query, matchCase, sheet}; replace {sheet, query, replacement, matchCase, all}; setColWidth {sheet, col, px}; setFreeze {sheet, rows, cols}; " +
+            "data.dashboard.list; data.dashboard.save {dashboard:{id, name, tiles:[{id, title, kind:\"kpi|chart|table\", chartType, sql:\"SELECT ...\", format:\"number|currency|percent\", x, y, w, h}]}} (a 12-column grid; x 0-11, w 1-12, rows of 84 px); data.dashboard.values {id}; " +
+            "pivot.fields {sheet, address}; pivot.run {sheet, address:\"A1:F500\", rows:[field], column:field, values:[{field, fn:\"sum|count|avg|min|max\"}]}; pivot.place {same} (writes it to the right of the data); " +
+            "chart.add {sheet, address:\"A1:C13\" (header row and numbers), type:\"column|bar|line|area|pie|scatter\", title}; chart.update {id, type, title, x, y, w, h}; chart.delete {id}; chart.list {sheet}; " +
+            "insertRows {sheet, row, count}; deleteRows {sheet, row, count}; insertCols {sheet, col, count}; deleteCols {sheet, col, count} (references move as in Excel; the sheet must have no filter or sort); " +
             "undo {sheet}; redo {sheet}; save {saveAs:false}; and the data engine's commands, such as data.views.list, data.recipes.run {id}, data.dashboards.list.",
             new JsonObject { ["command"] = Str("Command name, such as setSort."), ["args"] = new JsonObject { ["type"] = "object", ["description"] = "The command's arguments." } }, "command"),
     };

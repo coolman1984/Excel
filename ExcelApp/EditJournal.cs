@@ -14,7 +14,8 @@ public sealed class EditJournal : IDisposable
     public sealed record Cell(int S, int R, int C, CellEdit E);
     public sealed record Width(int S, int C, double Px);
     public sealed record Freeze(int S, int Rows, int Cols);
-    public sealed record Snapshot(string File, long Length, DateTime WriteUtc, DateTime SavedAt, List<Cell> Cells, List<Width> Widths, List<Freeze> Freezes);
+    /// <summary>Ops: inserted and deleted rows and columns, in order; the cells' positions are after them.</summary>
+    public sealed record Snapshot(string File, long Length, DateTime WriteUtc, DateTime SavedAt, List<Cell> Cells, List<Width> Widths, List<Freeze> Freezes, List<StructOp>? Ops = null, List<ChartSpec>? Charts = null);
 
     static readonly JsonSerializerOptions Opt = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, Converters = { new JsonStringEnumConverter() } };
     readonly FileRoot root; readonly object gate = new();
@@ -33,7 +34,9 @@ public sealed class EditJournal : IDisposable
         return new Snapshot(Path.GetFullPath(file), fi.Exists ? fi.Length : -1, fi.Exists ? fi.LastWriteTimeUtc : DateTime.MinValue, DateTime.Now,
             edits.All.Select(kv => new Cell(kv.Key.Sheet, kv.Key.Row, kv.Key.Col, kv.Value)).ToList(),
             edits.ColWidths.Select(kv => new Width(kv.Key.Sheet, kv.Key.Col, kv.Value)).ToList(),
-            edits.Freeze.Select(kv => new Freeze(kv.Key, kv.Value.Rows, kv.Value.Cols)).ToList());
+            edits.Freeze.Select(kv => new Freeze(kv.Key, kv.Value.Rows, kv.Value.Cols)).ToList(),
+            edits.Ops.Count == 0 ? null : edits.Ops.ToList(),
+            edits.Charts.Count == 0 ? null : edits.Charts.ToList());
     }
 
     /// <summary>Schedules a write. The snapshot is taken when the timer fires, so a burst of edits costs one write.</summary>
@@ -48,7 +51,7 @@ public sealed class EditJournal : IDisposable
         {
             var s = take(); if (s == null) return;
             string key = KeyOf(s.File);
-            if (s.Cells.Count == 0 && s.Widths.Count == 0 && s.Freezes.Count == 0) { root.Delete(key); return; }
+            if (s.Cells.Count == 0 && s.Widths.Count == 0 && s.Freezes.Count == 0 && (s.Ops?.Count ?? 0) == 0 && (s.Charts?.Count ?? 0) == 0) { root.Delete(key); return; }
             root.WriteAllText(key, JsonSerializer.Serialize(s, Opt));
         }
         catch (Exception e) { Log.Write("journal write " + e.GetType().Name); }
@@ -83,16 +86,24 @@ public sealed class EditJournal : IDisposable
         return fi.Exists && fi.Length == s.Length && fi.LastWriteTimeUtc == s.WriteUtc;
     }
 
-    /// <summary>Puts the journal's edits back: one undo step per sheet. Cells outside the sheets are skipped.</summary>
+    /// <summary>Puts the journal's edits back: its inserts and deletes first (in order), then the cells, one undo step per sheet.
+    /// Cells outside the sheets are skipped. <paramref name="size"/> gives a sheet's size in the fast copy.</summary>
     public static int Restore(Snapshot s, EditSet edits, Func<int, (int Rows, int Cols)> size)
     {
         int n = 0;
+        foreach (var op in s.Ops ?? new())
+        {
+            var (pr, pc) = size(op.Sheet); if (pr < 0) continue;
+            try { edits.Structure(op, pr, pc); n++; } catch (ArgumentOutOfRangeException) { }
+        }
         foreach (var g in s.Cells.GroupBy(c => c.S).OrderBy(g => g.Key))
         {
-            var (rows, cols) = size(g.Key); if (rows < 0) continue;
+            var (pr, pc) = size(g.Key); if (pr < 0) continue;
+            int rows = edits.RowCount(g.Key, pr), cols = edits.ColCount(g.Key, pc);
             var list = g.Where(c => c.R >= 0 && c.R < rows && c.C >= 0 && c.C < cols).Select(c => (c.R, c.C, (CellEdit?)c.E)).ToList();
             n += edits.Apply(g.Key, list).Count;
         }
+        foreach (var ch in s.Charts ?? new()) if (size(ch.Sheet).Rows >= 0 && edits.Chart(ch.Id) == null) { edits.SetChart(null, ch); n++; }
         foreach (var w in s.Widths) if (size(w.S).Rows >= 0) edits.SetColWidth(w.S, w.C, w.Px);
         foreach (var f in s.Freezes) if (size(f.S).Rows >= 0) edits.SetFreeze(f.S, f.Rows, f.Cols);
         return n;

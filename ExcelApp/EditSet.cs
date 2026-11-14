@@ -124,8 +124,16 @@ public static class InputParser
     }
 }
 
-/// <summary>The edits over the open workbook: values, styles, column widths and freeze.
-/// One user action is one undo record. Reading checks this before the file's own value.</summary>
+/// <summary>A chart over a range of a sheet (logical rows and columns, inclusive). X, Y, W, H: its card in the window, in pixels.
+/// Type: column, bar, line, area, pie or scatter.</summary>
+public sealed record ChartSpec(string Id, int Sheet, string Type, string? Title, int R1, int C1, int R2, int C2, double X, double Y, double W, double H);
+
+/// <summary>Rows (or columns) inserted or deleted on a sheet. At is the first logical row or column (0-based, as the editor shows them).</summary>
+public sealed record StructOp(int Sheet, bool Rows, int At, int Count, bool Insert);
+
+/// <summary>The edits over the open workbook: values, styles, column widths, freeze, and inserted or deleted rows and columns.
+/// One user action is one undo record. Reading checks this before the file's own value.
+/// Positions are logical (what the editor shows); a sheet's layout maps them to the fast copy's rows and columns.</summary>
 public sealed class EditSet
 {
     readonly Dictionary<(int Sheet, int Row, int Col), CellEdit> _edits = new();
@@ -138,7 +146,139 @@ public sealed class EditSet
     {
         public int Sheet;
         public readonly List<(int Row, int Col, CellEdit? Before, CellEdit? After)> Cells = new();
+        // An insert or delete: the whole state it replaced, so undo puts back exactly what was there.
+        public StructOp? Op; public int PhysRows, PhysCols;
+        public List<int>? RowsBefore, ColsBefore;
+        public Dictionary<(int Sheet, int Row, int Col), CellEdit>? EditsBefore;
+        public Dictionary<(int Sheet, int Col), double>? WidthsBefore;
+        public Dictionary<string, ChartSpec>? ChartsBefore;
+        // A chart added, changed or removed.
+        public bool IsChart; public ChartSpec? ChartBefore, ChartAfter;
     }
+
+    readonly Dictionary<string, ChartSpec> _charts = new();
+    /// <summary>The workbook's charts, made in this editor (saved into the file through Excel).</summary>
+    public IReadOnlyCollection<ChartSpec> Charts => _charts.Values;
+    public ChartSpec? Chart(string id) => _charts.TryGetValue(id, out var c) ? c : null;
+    /// <summary>Adds (before null), changes, or removes (after null) a chart as one undo step.</summary>
+    public void SetChart(ChartSpec? before, ChartSpec? after)
+    {
+        if (before == null && after == null) return;
+        PutChart(before, after);
+        _undo.Add(new Change { Sheet = (after ?? before)!.Sheet, IsChart = true, ChartBefore = before, ChartAfter = after }); _redo.Clear();
+    }
+    void PutChart(ChartSpec? remove, ChartSpec? add) { if (remove != null) _charts.Remove(remove.Id); if (add != null) _charts[add.Id] = add; Version++; }
+
+    // ---- layout: logical row/column -> fast-copy row/column (-1 = inserted, blank). Null = unchanged.
+    readonly Dictionary<int, List<int>> _rowsOf = new(), _colsOf = new();
+    readonly Dictionary<int, int[]> _rowInverse = new(), _colInverse = new();
+    readonly List<StructOp> _ops = new();
+
+    /// <summary>Moves a formula's references for an insert or delete: (formula's sheet, formula, op) -> new formula. Set by the session.</summary>
+    public Func<int, string, StructOp, string>? ShiftFormula { get; set; }
+
+    /// <summary>The inserts and deletes in effect, in the order they were made (the save replays them in Excel).</summary>
+    public IReadOnlyList<StructOp> Ops => _ops;
+    public bool HasLayout(int sheet) => _rowsOf.ContainsKey(sheet) || _colsOf.ContainsKey(sheet);
+    public int RowCount(int sheet, int physRows) => _rowsOf.TryGetValue(sheet, out var l) ? l.Count : physRows;
+    public int ColCount(int sheet, int physCols) => _colsOf.TryGetValue(sheet, out var l) ? l.Count : physCols;
+    /// <summary>The fast-copy row of a logical row; -1 for an inserted (blank) row or one past the end.</summary>
+    public int PhysRow(int sheet, int row) => _rowsOf.TryGetValue(sheet, out var l) ? (row >= 0 && row < l.Count ? l[row] : -1) : row;
+    public int PhysCol(int sheet, int col) => _colsOf.TryGetValue(sheet, out var l) ? (col >= 0 && col < l.Count ? l[col] : -1) : col;
+    /// <summary>The logical row showing a fast-copy row; -1 when that row was deleted.</summary>
+    public int LogicalRow(int sheet, int phys) => Inverse(_rowsOf, _rowInverse, sheet, phys);
+    public int LogicalCol(int sheet, int phys) => Inverse(_colsOf, _colInverse, sheet, phys);
+    static int Inverse(Dictionary<int, List<int>> map, Dictionary<int, int[]> cache, int sheet, int phys)
+    {
+        if (!map.TryGetValue(sheet, out var l)) return phys;
+        if (!cache.TryGetValue(sheet, out var inv))
+        {
+            int max = -1; foreach (int p in l) if (p > max) max = p;
+            inv = new int[max + 1]; Array.Fill(inv, -1);
+            for (int i = 0; i < l.Count; i++) if (l[i] >= 0) inv[l[i]] = i;
+            cache[sheet] = inv;
+        }
+        return phys >= 0 && phys < inv.Length ? inv[phys] : -1;
+    }
+
+    /// <summary>Inserts or deletes rows or columns as one undo step. Edits below move, edits in deleted rows go, and every
+    /// formula's references move as Excel moves them. <paramref name="physRows"/>/<paramref name="physCols"/> are the fast copy's size.</summary>
+    public void Structure(StructOp op, int physRows, int physCols)
+    {
+        int size = op.Rows ? RowCount(op.Sheet, physRows) : ColCount(op.Sheet, physCols);
+        if (op.Count < 1) throw new ArgumentOutOfRangeException(nameof(op));
+        if (op.Insert ? op.At < 0 || op.At > size : op.At < 0 || op.At + op.Count > size) throw new ArgumentOutOfRangeException(nameof(op));
+        var change = new Change
+        {
+            Sheet = op.Sheet, Op = op, PhysRows = physRows, PhysCols = physCols,
+            RowsBefore = _rowsOf.TryGetValue(op.Sheet, out var rb) ? new List<int>(rb) : null,
+            ColsBefore = _colsOf.TryGetValue(op.Sheet, out var cb) ? new List<int>(cb) : null,
+            EditsBefore = new Dictionary<(int, int, int), CellEdit>(_edits),
+            WidthsBefore = _colWidths.Where(kv => kv.Key.Sheet == op.Sheet).ToDictionary(kv => kv.Key, kv => kv.Value),
+            ChartsBefore = new Dictionary<string, ChartSpec>(_charts),
+        };
+        Run(op, physRows, physCols);
+        _undo.Add(change); _redo.Clear();
+    }
+
+    void Run(StructOp op, int physRows, int physCols)
+    {
+        int last = op.At + op.Count - 1;
+        int Move(int v) => op.Insert ? (v >= op.At ? v + op.Count : v) : (v < op.At ? v : v > last ? v - op.Count : -1);
+        var moved = new List<KeyValuePair<(int, int, int), CellEdit>>(_edits.Count);
+        foreach (var kv in _edits)
+        {
+            var (sh, r, c) = kv.Key; var e = kv.Value;
+            if (sh == op.Sheet) { if (op.Rows) r = Move(r); else c = Move(c); if (r < 0 || c < 0) continue; }
+            if (e.Kind == EditKind.Formula && ShiftFormula != null && e.Formula != null) e = e with { Formula = ShiftFormula(sh, e.Formula, op) };
+            moved.Add(new((sh, r, c), e));
+        }
+        _edits.Clear(); foreach (var kv in moved) _edits[kv.Key] = kv.Value;
+        if (!op.Rows)
+        {
+            var widths = _colWidths.Where(kv => kv.Key.Sheet == op.Sheet).ToList();
+            foreach (var kv in widths) _colWidths.Remove(kv.Key);
+            foreach (var kv in widths) { int c = Move(kv.Key.Col); if (c >= 0) _colWidths[(op.Sheet, c)] = kv.Value; }
+        }
+        // charts on the sheet: their ranges move, grow and shrink as formula ranges do; a chart whose range was deleted goes
+        foreach (var ch in _charts.Values.Where(x => x.Sheet == op.Sheet).ToList())
+        {
+            int a = op.Rows ? ch.R1 : ch.C1, b = op.Rows ? ch.R2 : ch.C2, na, nb;
+            if (op.Insert) { na = a >= op.At ? a + op.Count : a; nb = b >= op.At ? b + op.Count : b; }
+            else
+            {
+                if (a >= op.At && b <= last) { _charts.Remove(ch.Id); continue; }
+                na = a < op.At ? a : a > last ? a - op.Count : op.At; nb = b < op.At ? b : b > last ? b - op.Count : op.At - 1;
+            }
+            _charts[ch.Id] = op.Rows ? ch with { R1 = na, R2 = nb } : ch with { C1 = na, C2 = nb };
+        }
+        var map = op.Rows ? _rowsOf : _colsOf;
+        if (!map.TryGetValue(op.Sheet, out var l)) map[op.Sheet] = l = Enumerable.Range(0, op.Rows ? physRows : physCols).ToList();
+        if (op.Insert) l.InsertRange(op.At, Enumerable.Repeat(-1, op.Count)); else l.RemoveRange(op.At, op.Count);
+        (op.Rows ? _rowInverse : _colInverse).Remove(op.Sheet);
+        _ops.Add(op);
+        Recount();
+    }
+
+    void Recount() { _formulas = _edits.Values.Count(e => e.Kind == EditKind.Formula); Version++; }
+
+    void Restore(Change c)
+    {
+        _edits.Clear(); foreach (var kv in c.EditsBefore!) _edits[kv.Key] = kv.Value;
+        foreach (var k in _colWidths.Keys.Where(k => k.Sheet == c.Sheet).ToList()) _colWidths.Remove(k);
+        foreach (var kv in c.WidthsBefore!) _colWidths[kv.Key] = kv.Value;
+        if (c.RowsBefore != null) _rowsOf[c.Sheet] = new List<int>(c.RowsBefore); else _rowsOf.Remove(c.Sheet);
+        if (c.ColsBefore != null) _colsOf[c.Sheet] = new List<int>(c.ColsBefore); else _colsOf.Remove(c.Sheet);
+        _rowInverse.Remove(c.Sheet); _colInverse.Remove(c.Sheet);
+        _charts.Clear(); foreach (var kv in c.ChartsBefore!) _charts[kv.Key] = kv.Value;
+        _ops.RemoveAt(_ops.Count - 1);
+        Recount();
+    }
+
+    /// <summary>True when the last undo or redo was an insert or delete (the interface reads the whole sheet again).</summary>
+    public bool LastWasStructural { get; private set; }
+    /// <summary>True when the last undo or redo was a chart change.</summary>
+    public bool LastWasChart { get; private set; }
 
     /// <summary>Goes up on every change to the cell edits; formula results computed for an older version are stale.</summary>
     public long Version { get; private set; }
@@ -154,7 +294,7 @@ public sealed class EditSet
     }
 
     /// <summary>True when an edit, a width or a freeze change exists.</summary>
-    public bool Dirty => _edits.Count > 0 || _colWidths.Count > 0 || _freeze.Count > 0;
+    public bool Dirty => _edits.Count > 0 || _colWidths.Count > 0 || _freeze.Count > 0 || _ops.Count > 0 || _charts.Count > 0;
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
@@ -195,6 +335,9 @@ public sealed class EditSet
         if (_undo.Count == 0) return (-1, new List<(int Row, int Col)>());
         var change = _undo[_undo.Count - 1];
         _undo.RemoveAt(_undo.Count - 1);
+        LastWasStructural = change.Op != null; LastWasChart = change.IsChart;
+        if (change.IsChart) { PutChart(change.ChartAfter, change.ChartBefore); _redo.Add(change); return (change.Sheet, new List<(int Row, int Col)>()); }
+        if (change.Op != null) { Restore(change); _redo.Add(change); return (change.Sheet, new List<(int Row, int Col)>()); }
         var changed = new List<(int Row, int Col)>(change.Cells.Count);
         for (int i = change.Cells.Count - 1; i >= 0; i--)
         {
@@ -214,6 +357,9 @@ public sealed class EditSet
         if (_redo.Count == 0) return (-1, new List<(int Row, int Col)>());
         var change = _redo[_redo.Count - 1];
         _redo.RemoveAt(_redo.Count - 1);
+        LastWasStructural = change.Op != null; LastWasChart = change.IsChart;
+        if (change.IsChart) { PutChart(change.ChartBefore, change.ChartAfter); _undo.Add(change); return (change.Sheet, new List<(int Row, int Col)>()); }
+        if (change.Op != null) { Run(change.Op, change.PhysRows, change.PhysCols); _undo.Add(change); return (change.Sheet, new List<(int Row, int Col)>()); }
         var changed = new List<(int Row, int Col)>(change.Cells.Count);
         foreach (var (row, col, before, after) in change.Cells)
         {
@@ -241,5 +387,6 @@ public sealed class EditSet
         _freeze.Clear();
         _undo.Clear();
         _redo.Clear();
+        _rowsOf.Clear(); _colsOf.Clear(); _rowInverse.Clear(); _colInverse.Clear(); _ops.Clear(); _charts.Clear();
     }
 }

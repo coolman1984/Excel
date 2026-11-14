@@ -52,6 +52,13 @@ public sealed partial class Session : IDisposable
     public Session(string? dataDir = null)
     {
         DataDir = dataDir ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExcelApp");
+        // Inserting or deleting rows or columns moves every formula's references as Excel does (EditSet calls this per formula).
+        Edits.ShiftFormula = (formulaSheet, f, op) =>
+        {
+            var c = cache; if (c == null || op.Sheet >= c.Sheets.Count) return f;
+            var d = c.Sheets[op.Sheet];
+            return Formula.FormulaShift.Structural(f, formulaSheet == op.Sheet, d.Name, op.Rows, (op.Rows ? d.FirstRow : d.FirstCol) + op.At, op.Count, op.Insert);
+        };
         memTimer = new System.Threading.Timer(_ => { try { double c = Machine.Commit(); if (c > 85) Emit("memory", new { CommitPercent = Math.Round(c, 1) }); } catch (Exception) { } }, null, 5000, 5000);
     }
 
@@ -74,6 +81,8 @@ public sealed partial class Session : IDisposable
         S("cellDetail", CellDetail);
         S("setCell", SetCell); S("clearCells", ClearCells); S("setStyle", SetStyle);
         S("undo", a => UndoRedo(true)); S("redo", a => UndoRedo(false));
+        S("insertRows", a => Restructure(a, true, true)); S("deleteRows", a => Restructure(a, true, false));
+        S("insertCols", a => Restructure(a, false, true)); S("deleteCols", a => Restructure(a, false, false));
         S("copy", a => Copy(a, false)); S("cut", a => Copy(a, true)); S("paste", Paste); S("fill", Fill);
         S("filterValues", FilterValues); S("setFilter", SetFilter); S("clearFilters", ClearFilters);
         S("setSort", SetSort); S("setHeaderRow", SetHeaderRow);
@@ -90,6 +99,8 @@ public sealed partial class Session : IDisposable
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
         RegisterAgent(h);  // AI agents: read and write by Excel address (SessionAgent.cs)
+        RegisterCharts(h); // charts (SessionCharts.cs)
+        RegisterPivot(h);  // PivotTables (SessionPivot.cs)
         Agents?.Register(h); // the Agent panel: Claude Code CLI / Codex CLI
         Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }
@@ -279,14 +290,17 @@ public sealed partial class Session : IDisposable
 
     CacheData Need() => cache ?? throw new UserError("No file is open.");
     SheetState St(int sheet) { Need(); if (sheet < 0 || sheet >= sheets.Length) throw new UserError("That sheet does not exist."); return sheets[sheet]; }
-    static int ViewRows(CacheData c, SheetState s, int sheet) => s.Map?.Length ?? c.Sheets[sheet].Rows;
+    int ViewRows(CacheData c, SheetState s, int sheet) => s.Map?.Length ?? RowsOf(sheet);
+    /// <summary>The sheet's size as the editor shows it: the fast copy's, plus inserted and minus deleted rows and columns.</summary>
+    int RowsOf(int sheet) { lock (editLock) return Edits.RowCount(sheet, cache!.Sheets[sheet].Rows); }
+    int ColsOf(int sheet) { lock (editLock) return Edits.ColCount(sheet, cache!.Sheets[sheet].Cols); }
     static int Real(SheetState s, int view) => s.Map != null ? s.Map[view] : view;
     int ToView(int sheet, int real)
     {
         var s = sheets[sheet];
-        if (real < 0 || real >= cache!.Sheets[sheet].Rows) return -1;
+        if (real < 0 || real >= RowsOf(sheet)) return -1;
         if (s.Map == null) return real;
-        if (s.Inverse == null) { var inv = new int[cache!.Sheets[sheet].Rows]; Array.Fill(inv, -1); for (int i = 0; i < s.Map.Length; i++) inv[s.Map[i]] = i; s.Inverse = inv; }
+        if (s.Inverse == null) { var inv = new int[RowsOf(sheet)]; Array.Fill(inv, -1); for (int i = 0; i < s.Map.Length; i++) inv[s.Map[i]] = i; s.Inverse = inv; }
         return real >= 0 && real < s.Inverse.Length ? s.Inverse[real] : -1;
     }
 
@@ -298,15 +312,17 @@ public sealed partial class Session : IDisposable
         var c = Need();
         var list = c.Sheets.Select((d, i) =>
         {
-            var widths = new double[d.Cols];
-            for (int k = 0; k < d.Cols; k++)
+            int rows = RowsOf(i), cols = ColsOf(i);
+            var widths = new double[cols];
+            for (int k = 0; k < cols; k++)
             {
-                double w = d.ColWidths[k]; widths[k] = Math.Round(w * 7 + 5);
+                int pc; lock (editLock) pc = Edits.PhysCol(i, k);
+                widths[k] = pc >= 0 && pc < d.ColWidths.Length ? Math.Round(d.ColWidths[pc] * 7 + 5) : 64;   // an inserted column: Excel's default width
                 lock (editLock) if (Edits.ColWidths.TryGetValue((i, k), out var px)) widths[k] = px;
             }
             int fr = 0, fc = 0; if (sidecar != null && sidecar.Sheets.TryGetValue(i, out var s2)) { fr = s2.FrozenRows; fc = s2.FrozenCols; }
             lock (editLock) if (Edits.Freeze.TryGetValue(i, out var f)) { fr = f.Rows; fc = f.Cols; }
-            return new { index = i, name = d.Name, hidden = d.Hidden, rows = d.Rows, cols = d.Cols, firstRow = d.FirstRow, firstCol = d.FirstCol, colWidthsPx = widths, frozenRows = fr, frozenCols = fc };
+            return new { index = i, name = d.Name, hidden = d.Hidden, rows, cols, firstRow = d.FirstRow, firstCol = d.FirstCol, colWidthsPx = widths, frozenRows = fr, frozenCols = fc };
         }).ToList();
         return new { name = FileName, path, sheets = list, dirty = Dirty, currentSheet = current, partialStyles = sidecar?.Partial ?? false };
     }
@@ -352,7 +368,7 @@ public sealed partial class Session : IDisposable
         gate.Wait();
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
         int total = ViewRows(c, st, sheet), from = Math.Max(0, Arg.Int(a, "from")), count = Math.Clamp(Arg.Int(a, "count"), 0, 500);
-        int colFrom = Math.Clamp(Arg.Int(a, "colFrom", 0), 0, Math.Max(0, d.Cols)), colCount = Math.Clamp(Arg.Int(a, "colCount", d.Cols), 0, d.Cols - colFrom);
+        int colFrom = Math.Clamp(Arg.Int(a, "colFrom", 0), 0, Math.Max(0, ColsOf(sheet))), colCount = Math.Clamp(Arg.Int(a, "colCount", ColsOf(sheet)), 0, ColsOf(sheet) - colFrom);
         count = Math.Min(count, Math.Max(1, 400_000 / Math.Max(1, colCount)));
         count = Math.Max(0, Math.Min(count, total - from));
         var map = st.Map; var rows = new object[count];
@@ -390,7 +406,7 @@ public sealed partial class Session : IDisposable
 
     void CheckCell(CacheData c, SheetState st, int sheet, int vr, int col)
     {
-        if (vr < 0 || vr >= ViewRows(c, st, sheet) || col < 0 || col >= c.Sheets[sheet].Cols) throw new UserError("That cell is outside the sheet.");
+        if (vr < 0 || vr >= ViewRows(c, st, sheet) || col < 0 || col >= ColsOf(sheet)) throw new UserError("That cell is outside the sheet.");
     }
 
     // =====================================================================================
@@ -437,7 +453,7 @@ public sealed partial class Session : IDisposable
     // View-space rectangles clamped to the sheet, as a flat list.
     List<(int R, int C)> Expand(CacheData c, SheetState st, int sheet, List<(int R1, int C1, int R2, int C2)> ranges)
     {
-        int vrows = ViewRows(c, st, sheet), cols = c.Sheets[sheet].Cols; long n = 0;
+        int vrows = ViewRows(c, st, sheet), cols = ColsOf(sheet); long n = 0;
         var rects = ranges.Select(r => (R1: Math.Max(0, r.R1), C1: Math.Max(0, r.C1), R2: Math.Min(vrows - 1, r.R2), C2: Math.Min(cols - 1, r.C2))).Where(r => r.R1 <= r.R2 && r.C1 <= r.C2).ToList();
         foreach (var r in rects) n += (long)(r.R2 - r.R1 + 1) * (r.C2 - r.C1 + 1);
         if (n > MaxCells) throw new UserError($"Too many cells are selected. The limit is {MaxCells:N0} cells.");
@@ -543,11 +559,54 @@ public sealed partial class Session : IDisposable
     object UndoRedo(bool undo)
     {
         Need(); (int Sheet, List<(int, int)> Changed) r;
-        lock (editLock) r = undo ? Edits.Undo() : Edits.Redo();
+        bool structural;
+        lock (editLock) { r = undo ? Edits.Undo() : Edits.Redo(); structural = r.Sheet >= 0 && Edits.LastWasStructural; }
         Dirtied();
         if (r.Sheet < 0) return new { sheet = -1, changed = new List<int[]>(), dirty = Dirty, canUndo = Edits.CanUndo, canRedo = Edits.CanRedo };
+        if (structural) { AfterStructure(r.Sheet); return StructureResult(r.Sheet); }
         return MutationResult(r.Sheet, r.Changed);
     }
+
+    // ---- inserting and deleting rows and columns ----------------------------------------------
+    /// <summary>insertRows / deleteRows {sheet, row, count} and insertCols / deleteCols {sheet, col, count}, in the
+    /// interface's coordinates. One undo step; saved by replaying it in Excel (SaveBack).</summary>
+    object Restructure(JsonElement a, bool rows, bool insert)
+    {
+        var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
+        if (st.Map != null) throw new UserError("Clear the filter and the sorting on this sheet first, then insert or delete.");
+        int at = Arg.Int(a, rows ? "row" : "col"), count = Arg.Int(a, "count", 1);
+        int size = rows ? RowsOf(sheet) : ColsOf(sheet), max = rows ? 1_048_576 - d.FirstRow + 1 : 16_384 - d.FirstCol + 1;
+        string what = rows ? (count == 1 ? "row" : "rows") : (count == 1 ? "column" : "columns");
+        if (count < 1 || count > max) throw new UserError($"Choose between 1 and {max:N0} {what}.");
+        if (insert)
+        {
+            if (at < 0 || at > size) throw new UserError("That place is outside the sheet.");
+            if (size + count > max) throw new UserError($"There is no room for {count:N0} more {what}: Excel sheets stop at {(rows ? "row 1,048,576" : "column XFD")}.");
+        }
+        else
+        {
+            if (at < 0 || at + count > size) throw new UserError($"Those {what} are outside the sheet.");
+            if (count >= size) throw new UserError($"A sheet keeps at least one {(rows ? "row" : "column")}.");
+        }
+        lock (editLock) Edits.Structure(new StructOp(sheet, rows, at, count, insert), d.Rows, d.Cols);
+        AfterStructure(sheet);
+        Dirtied();
+        return StructureResult(sheet);
+    }
+
+    /// <summary>After an insert or delete (or its undo): the view is the plain sheet again, and cut or copied positions are gone.</summary>
+    void AfterStructure(int sheet)
+    {
+        var st = sheets[sheet];
+        st.Engine.ClearConditions(); st.Sort = new(); st.Engine.SetSort(st.Sort); st.Map = null; st.Inverse = null;
+        pendingCut = null; copiedFormulas = null;
+    }
+
+    object StructureResult(int sheet) => new
+    {
+        sheet, structure = true, rows = RowsOf(sheet), cols = ColsOf(sheet), viewRows = ViewRows(cache!, sheets[sheet], sheet),
+        dirty = Dirty, canUndo = Edits.CanUndo, canRedo = Edits.CanRedo, recalc = cells?.HasFormulas ?? false,
+    };
 
     // ---- clipboard ------------------------------------------------------------------------
     static string Hash(string s) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(s)));
@@ -624,7 +683,7 @@ public sealed partial class Session : IDisposable
         for (int i = 0; i < grid.Count; i++)
             for (int k = 0; k < grid[i].Count; k++)
             {
-                int vr = row0 + i, col = col0 + k; if (vr >= vrows || col >= d.Cols) continue;
+                int vr = row0 + i, col = col0 + k; if (vr >= vrows || col >= ColsOf(sheet)) continue;
                 int real = Real(st, vr); seen.Add((real, col));
                 if (formulas != null && formulas.TryGetValue((i, k), out var src))
                 {
@@ -647,8 +706,8 @@ public sealed partial class Session : IDisposable
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
         var src = Arg.Rect(a.GetProperty("from")); var dst = Arg.Rect(a.GetProperty("to"));
         int h = src.R2 - src.R1 + 1, w = src.C2 - src.C1 + 1; int vrows = ViewRows(c, st, sheet);
-        if (src.R1 < 0 || src.C1 < 0 || src.R2 >= vrows || src.C2 >= d.Cols) throw new UserError("That fill is outside the sheet.");
-        long n = (long)(Math.Min(dst.R2, vrows - 1) - Math.Max(dst.R1, 0) + 1) * (Math.Min(dst.C2, d.Cols - 1) - Math.Max(dst.C1, 0) + 1);
+        if (src.R1 < 0 || src.C1 < 0 || src.R2 >= vrows || src.C2 >= ColsOf(sheet)) throw new UserError("That fill is outside the sheet.");
+        long n = (long)(Math.Min(dst.R2, vrows - 1) - Math.Max(dst.R1, 0) + 1) * (Math.Min(dst.C2, ColsOf(sheet) - 1) - Math.Max(dst.C1, 0) + 1);
         if (n > MaxCells) throw new UserError($"Too many cells are selected. The limit is {MaxCells:N0} cells.");
         var list = new List<(int, int, CellEdit?)>();
         // Filling down or up runs along rows; filling left or right runs along columns. Each line of the source makes its own series.
@@ -670,7 +729,7 @@ public sealed partial class Session : IDisposable
                 return series[line] = FillSeries.Of(items, formats);
             }
             for (int vr = Math.Max(dst.R1, 0); vr <= Math.Min(dst.R2, vrows - 1); vr++)
-                for (int col = Math.Max(dst.C1, 0); col <= Math.Min(dst.C2, d.Cols - 1); col++)
+                for (int col = Math.Max(dst.C1, 0); col <= Math.Min(dst.C2, ColsOf(sheet) - 1); col++)
                 {
                     if (vr >= src.R1 && vr <= src.R2 && col >= src.C1 && col <= src.C2) continue;
                     int sr = src.R1 + (((vr - src.R1) % h) + h) % h, sc = src.C1 + (((col - src.C1) % w) + w) % w;
@@ -713,10 +772,10 @@ public sealed partial class Session : IDisposable
     object FilterValues(JsonElement a)
     {
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); int col = Arg.Int(a, "col");
-        if (col < 0 || col >= c.Sheets[sheet].Cols) throw new UserError("That column does not exist.");
+        if (col < 0 || col >= ColsOf(sheet)) throw new UserError("That column does not exist.");
         var (values, blanks, truncated) = st.Engine.Distinct(col, Arg.Str(a, "search"));
         // Number filters for columns that are mostly numbers, text filters otherwise.
-        int rows = c.Sheets[sheet].Rows, from = Math.Min(rows, st.Header ? 1 : 0), n = Math.Min(1000, rows - from), nums = 0, texts = 0;
+        int rows = RowsOf(sheet), from = Math.Min(rows, st.Header ? 1 : 0), n = Math.Min(1000, rows - from), nums = 0, texts = 0;
         if (n > 0) { var t = new string[n]; var k = new byte[n]; var m = new double[n]; st.Source.Read(col, from, n, t, k, m); foreach (var x in k) { if (x == 1) nums++; else if (x == 2) texts++; } }
         return new { values = values.Select(v => new { text = v.Text, count = v.Count }).ToList(), blanks, truncated, kind = nums >= texts ? "number" : "text" };
     }
@@ -735,7 +794,7 @@ public sealed partial class Session : IDisposable
     object SetFilter(JsonElement a)
     {
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); int col = Arg.Int(a, "col");
-        if (col < 0 || col >= c.Sheets[sheet].Cols) throw new UserError("That column does not exist.");
+        if (col < 0 || col >= ColsOf(sheet)) throw new UserError("That column does not exist.");
         st.Engine.SetCondition(col, ParseCondition(Arg.Obj(a, "condition")));
         return RecomputeView(sheet, st);
     }
@@ -747,7 +806,7 @@ public sealed partial class Session : IDisposable
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet);
         var keys = new List<(int, bool)>();
         if (a.TryGetProperty("keys", out var arr) && arr.ValueKind == JsonValueKind.Array)
-            foreach (var k in arr.EnumerateArray()) { int col = Arg.Int(k, "col"); if (col < 0 || col >= c.Sheets[sheet].Cols) throw new UserError("That column does not exist."); keys.Add((col, Arg.Bool(k, "desc"))); }
+            foreach (var k in arr.EnumerateArray()) { int col = Arg.Int(k, "col"); if (col < 0 || col >= ColsOf(sheet)) throw new UserError("That column does not exist."); keys.Add((col, Arg.Bool(k, "desc"))); }
         st.Sort = keys; st.Engine.SetSort(keys);
         return RecomputeView(sheet, st);
     }
@@ -782,7 +841,7 @@ public sealed partial class Session : IDisposable
                     total++; batch.Add(new object[] { sheetIndex, row, col, text });
                     if (batch.Count >= 200) Flush();
                 }
-                bool cacheComplete = SearchEngine.Run(cacheNow, which, query, h => Hit(h.Sheet, h.Row, h.Col),
+                bool cacheComplete = SearchEngine.Run(cacheNow, which, query, h => { var (lr, lc) = cellsNow.Logical(h.Sheet, h.Row, h.Col); if (lr >= 0) Hit(h.Sheet, lr, lc); },
                     p => Emit("findProgress", new { Percent = p }), cts.Token);
                 completed &= cacheComplete;
                 foreach (var (key, edit) in overlay) {
@@ -808,7 +867,7 @@ public sealed partial class Session : IDisposable
         void Try(SheetReader rd, int real, int col)
         {
             string? t; bool edited = cells!.TryEdit(sheet, real, col, out var e) && !EditMarks.IsStyleOnly(e);
-            if (edited) t = e!.Kind == EditKind.Text ? e.Text : null; else t = rd.RawText(real, col);
+            if (edited) t = e!.Kind == EditKind.Text ? e.Text : null; else t = cells.FileValue(sheet, rd, real, col).Text;
             if (string.IsNullOrEmpty(t) || !t.Contains(query, cmp)) return;
             var fresh = (edited ? e! : new CellEdit(EditKind.Text)) with { Kind = EditKind.Text, Text = t.Replace(query, repl, cmp) };
             list.Add((real, col, KeepStyle(sheet, real, col, fresh))); count++;
@@ -821,7 +880,7 @@ public sealed partial class Session : IDisposable
             {
                 if (!a.TryGetProperty("at", out var at) || at.GetArrayLength() < 2) throw new UserError("Choose a cell first.");
                 int rr = at[0].GetInt32(), cc = at[1].GetInt32();
-                if (rr < 0 || rr >= d.Rows || cc < 0 || cc >= d.Cols) throw new UserError("That cell is outside the sheet.");
+                if (rr < 0 || rr >= RowsOf(sheet) || cc < 0 || cc >= ColsOf(sheet)) throw new UserError("That cell is outside the sheet.");
                 Try(rd, rr, cc);
             }
             else
@@ -832,7 +891,7 @@ public sealed partial class Session : IDisposable
                     for (int col = 0; col < d.Cols; col++)
                     {
                         var ch = rd.LoadColumn(ci, col); if (ch.Blob == null) continue;
-                        for (int i = 0; i < n; i++) if (ch.KindAt(i) == CellKind.Text) Try(rd, r0 + i, col);
+                        for (int i = 0; i < n; i++) if (ch.KindAt(i) == CellKind.Text) { var (lr, lc) = cells!.Logical(sheet, r0 + i, col); if (lr >= 0) Try(rd, lr, lc); }
                         if (list.Count > MaxCells) throw new UserError($"Too many cells would change. The limit is {MaxCells:N0}.");
                     }
                 }
@@ -856,7 +915,7 @@ public sealed partial class Session : IDisposable
         gate.Wait();
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
         var ranges = Arg.Ranges(a); int vrows = ViewRows(c, st, sheet); long area = 0;
-        var rects = ranges.Select(r => (R1: Math.Max(0, r.R1), C1: Math.Max(0, r.C1), R2: Math.Min(vrows - 1, r.R2), C2: Math.Min(d.Cols - 1, r.C2))).Where(r => r.R1 <= r.R2 && r.C1 <= r.C2).ToList();
+        var rects = ranges.Select(r => (R1: Math.Max(0, r.R1), C1: Math.Max(0, r.C1), R2: Math.Min(vrows - 1, r.R2), C2: Math.Min(ColsOf(sheet) - 1, r.C2))).Where(r => r.R1 <= r.R2 && r.C1 <= r.C2).ToList();
         foreach (var r in rects) area += (long)(r.R2 - r.R1 + 1) * (r.C2 - r.C1 + 1);
         if (area > 2_000_000) return new { count = area, numbers = (long?)null, cheap = true };
         long count = 0, numbers = 0; double sum = 0, min = double.MaxValue, max = double.MinValue;
@@ -877,10 +936,9 @@ public sealed partial class Session : IDisposable
                         }
                         else
                         {
-                            var ch = rd.Column(real, col); int i = real % d.BlockRows; kind = ch.KindAt(i);
-                            if (kind == CellKind.Number) num = ch.Nums[i];
-                            else if (kind == CellKind.Text && ch.TextBytes(i).Length == 0) kind = 0;
-                            else if (kind == CellKind.Number && num == 0 && d.HideZeros) kind = 0;
+                            var fv = cells.FileValue(sheet, rd, real, col); kind = fv.Kind;
+                            if (kind == CellKind.Number) num = fv.Num;
+                            if (kind == CellKind.Number && num == 0 && d.HideZeros) kind = 0;
                         }
                         if (kind == 0) continue;
                         count++;
@@ -895,8 +953,7 @@ public sealed partial class Session : IDisposable
     {
         if (cells!.TryEdit(sheet, real, col, out var e) && !EditMarks.IsStyleOnly(e))
             return e.Kind == EditKind.Clear || e.Kind == EditKind.Text && string.IsNullOrEmpty(e.Text);
-        var ch = rd.Column(real, col); int i = real % rd.Sheet.BlockRows; byte k = ch.KindAt(i);
-        return k == CellKind.Empty || k == CellKind.Text && ch.TextBytes(i).Length == 0;
+        return cells.FileValue(sheet, rd, real, col).Kind == CellKind.Empty;
     }
 
     object Edge(JsonElement a)
@@ -904,12 +961,12 @@ public sealed partial class Session : IDisposable
         gate.Wait();
         var c = Need(); int sheet = Arg.Int(a, "sheet"); var st = St(sheet); var d = c.Sheets[sheet];
         // Rows in and out are real sheet rows (as findHits and locate use); the walk follows the shown rows.
-        int realIn = Arg.Int(a, "row"), col = Arg.Int(a, "col"); int row = realIn >= 0 && realIn < d.Rows ? ToView(sheet, realIn) : -1;
+        int realIn = Arg.Int(a, "row"), col = Arg.Int(a, "col"); int row = realIn >= 0 && realIn < RowsOf(sheet) ? ToView(sheet, realIn) : -1;
         if (row < 0) throw new UserError("That cell is not shown.");
         CheckCell(c, st, sheet, row, col);
         string dir = Arg.Str(a, "direction") ?? "down";
         int dr = dir == "down" ? 1 : dir == "up" ? -1 : 0, dc = dir == "right" ? 1 : dir == "left" ? -1 : 0;
-        int vrows = ViewRows(c, st, sheet), cols = d.Cols;
+        int vrows = ViewRows(c, st, sheet), cols = ColsOf(sheet);
         lock (readerLock)
         {
             var rd = Reader(sheet);
@@ -1024,9 +1081,14 @@ public sealed partial class Session : IDisposable
 
     string BuildJob(CacheData c, string source, string target, bool same)
     {
-        var edits = new List<object>(); var widths = new List<object>(); var freeze = new List<object>();
+        var edits = new List<object>(); var widths = new List<object>(); var freeze = new List<object>(); var structure = new List<object>(); var charts = new List<object>();
         lock (editLock)
         {
+            foreach (var op in Edits.Ops)
+            {
+                var d = c.Sheets[op.Sheet];
+                structure.Add(new { sheet = d.Name, rows = op.Rows, at = (op.Rows ? d.FirstRow : d.FirstCol) + op.At, count = op.Count, insert = op.Insert });
+            }
             foreach (var (key, e) in Edits.All)
             {
                 var d = c.Sheets[key.Sheet]; bool so = EditMarks.IsStyleOnly(e);
@@ -1038,8 +1100,13 @@ public sealed partial class Session : IDisposable
             }
             foreach (var kv in Edits.ColWidths) { var d = c.Sheets[kv.Key.Sheet]; widths.Add(new { sheet = d.Name, col = d.FirstCol + kv.Key.Col, px = kv.Value }); }
             foreach (var kv in Edits.Freeze) freeze.Add(new { sheet = c.Sheets[kv.Key].Name, rows = kv.Value.Rows, cols = kv.Value.Cols });
+            foreach (var ch in Edits.Charts)
+            {
+                var d = c.Sheets[ch.Sheet];
+                charts.Add(new { sheet = d.Name, type = ch.Type, title = ch.Title, row1 = d.FirstRow + ch.R1, col1 = d.FirstCol + ch.C1, row2 = d.FirstRow + ch.R2, col2 = d.FirstCol + ch.C2, width = ch.W, height = ch.H });
+            }
         }
-        return JsonSerializer.Serialize(new { source, target, sameFile = same, expectedLength = same ? (long?)c.SourceLength : null, expectedTicks = same ? (long?)c.SourceTicks : null, edits, colWidths = widths, freeze },
+        return JsonSerializer.Serialize(new { source, target, sameFile = same, expectedLength = same ? (long?)c.SourceLength : null, expectedTicks = same ? (long?)c.SourceTicks : null, edits, colWidths = widths, freeze, structure, charts },
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
     }
 }
