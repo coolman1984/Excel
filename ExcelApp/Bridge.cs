@@ -24,6 +24,9 @@ public sealed class Bridge
         session.Register(handlers);
     }
 
+    /// <summary>Tells the interface something happened outside it (an AI agent changed the workbook).</summary>
+    public void Notify(string name, object? payload) => PostEvent(name, payload);
+
     void PostEvent(string name, object? payload)
     {
         var d = new Dictionary<string, object?> { ["event"] = name };

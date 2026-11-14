@@ -63,9 +63,18 @@ static class Program
         using var o = new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true };
         try
         {
+            if (mcp)
+            {
+                // The workbook tools work whenever the window is open; the store tools need the approved store.
+                ExcelApp.Data.Agent.AgentData? store = null; string? problem = null;
+                try { var r = ExcelApp.Data.StoreRoot.Production(); store = new ExcelApp.Data.Agent.AgentData(new ExcelApp.Data.TableProvider(r, new ExcelApp.Data.Catalog(r))); }
+                catch (Exception e) when (e is CachePolicyException or UserError) { problem = e.Message; }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { problem = "The data store folder cannot be opened."; }
+                new ExcelApp.Data.Agent.McpServer(store, new ExcelApp.Agent.AppClient(), problem).Run(new StreamReader(Console.OpenStandardInput(), utf8), o);
+                return 0;
+            }
             var root = ExcelApp.Data.StoreRoot.Production();
             var api = new ExcelApp.Data.Agent.AgentData(new ExcelApp.Data.TableProvider(root, new ExcelApp.Data.Catalog(root)));
-            if (mcp) { new ExcelApp.Data.Agent.McpServer(api).Run(new StreamReader(Console.OpenStandardInput(), utf8), o); return 0; }
             object answer;
             if (a[0] == "--tables") answer = api.Tables();
             else

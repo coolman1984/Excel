@@ -7,7 +7,7 @@ using ExcelViewer.Core;
 
 namespace ExcelApp;
 
-public sealed class Session : IDisposable
+public sealed partial class Session : IDisposable
 {
     public const int MaxCells = 200_000;
     public const string Version = "1.0";
@@ -89,6 +89,7 @@ public sealed class Session : IDisposable
         S("openExternal", _ => { if (path != null) Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", path }, UseShellExecute = false, CreateNoWindow = true }); return new { }; });
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
+        RegisterAgent(h);  // AI agents: read and write by Excel address (SessionAgent.cs)
         Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }
 

@@ -10,6 +10,7 @@ public sealed class MainForm : Form
     public readonly WebView2 View = new();
     public readonly Session Session;
     public readonly Bridge Bridge;
+    readonly ExcelApp.Agent.AgentLink agentLink;
     readonly string? devUrl; readonly string uiFolder;
     public bool Unattended; bool allowClose, closeAsked, closeAfterSave;
     public string? OpenOnStart;
@@ -49,6 +50,10 @@ public sealed class MainForm : Form
         DragDrop += (s, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0) { try { Session.Open(f[0]); } catch (UserError) { } } };
         FormClosing += OnClosing;
         Load += async (s, e) => await Init();
+        // AI agents (owner's decision, 2026-11-14) reach the open workbook through ExcelApp.exe --mcp and this door.
+        agentLink = new ExcelApp.Agent.AgentLink(Bridge.Dispatch, cmd => Bridge.Notify("agentChanged", new { Cmd = cmd }));
+        agentLink.Start();
+        FormClosed += (s, e) => agentLink.Dispose();
     }
 
     // The built interface next to the program; else the temporary stub of the source tree.

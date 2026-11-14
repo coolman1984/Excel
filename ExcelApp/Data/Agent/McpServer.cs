@@ -7,10 +7,17 @@ namespace ExcelApp.Data.Agent;
 
 public sealed class McpServer
 {
-    readonly AgentData data;
-    public McpServer(AgentData data) => this.data = data;
+    readonly AgentData? data; readonly ExcelApp.Agent.IAppLink? app; readonly string storeProblem;
+    /// <summary><paramref name="data"/> answers the store tools (null when the store cannot open here, with the reason);
+    /// <paramref name="app"/> reaches the running ExcelApp window for the workbook tools (null leaves them out).</summary>
+    public McpServer(AgentData? data, ExcelApp.Agent.IAppLink? app = null, string? storeProblem = null)
+    { this.data = data; this.app = app; this.storeProblem = storeProblem ?? "The data store cannot be opened on this computer."; }
 
     static readonly string[] Versions = { "2025-06-18", "2025-03-26", "2024-11-05" };
+    const string AppInstructions =
+        "The open workbook in the ExcelApp window: app_status shows the file, its sheets and their used ranges; read_range and write_range " +
+        "use Excel addresses (Sheet1!A1:D20); write_range takes rows of values where text starting with = is a formula, and is one undo step. " +
+        "run_command runs any of the window's own commands (styles, filters, sorting, fill, find and replace, undo, save, and the data engine's data.* commands). ";
     const string Instructions =
         "ExcelApp's data store: report types (every loaded period of a report, latest version) and tables. " +
         "Start with list_tables, then describe_table for column names and sample rows, then query with SQL. " +
@@ -26,7 +33,33 @@ public sealed class McpServer
         ["annotations"] = new JsonObject { ["readOnlyHint"] = true, ["openWorldHint"] = false },
     };
 
-    static JsonArray ToolList() => new()
+    JsonArray ToolList()
+    {
+        var tools = StoreTools();
+        if (app != null) foreach (var t in AppTools()) tools.Add(t!.DeepClone());
+        return tools;
+    }
+    static JsonObject Str(string description) => new() { ["type"] = "string", ["description"] = description };
+    static JsonArray AppTools() => new()
+    {
+        Tool("app_status", "The workbook open in the ExcelApp window: file name, unsaved changes, the current sheet, and every sheet's used range, rows and columns. " + AppInstructions, new JsonObject()),
+        Tool("read_range", "Reads cells of the open workbook as Excel shows them (formatted text), with the formula of any formula cell. At most 20,000 cells per call.",
+            new JsonObject { ["range"] = Str("Excel range, such as A1:D20, Sheet1!B2:B50, C:C or 3:5."), ["sheet"] = Str("Sheet name, when the range does not name one. Default: the current sheet.") }, "range"),
+        Write("write_range", "Writes values into the open workbook starting at one cell, row by row, as typed into Excel: numbers, text, true/false, null to clear, and text starting with = as a formula. One undo step; the file is changed only when saved.",
+            new JsonObject { ["start"] = Str("Top-left cell, such as B2 or Sheet1!B2."), ["sheet"] = Str("Sheet name, when start does not name one."),
+                             ["values"] = new JsonObject { ["type"] = "array", ["description"] = "Rows of values, such as [[\"Total\", \"=SUM(B2:B9)\"]].", ["items"] = new JsonObject { ["type"] = "array" } } }, "start", "values"),
+        Write("run_command", "Runs one of the ExcelApp window's own commands. Coordinates here are 0-based inside the sheet's data (row 0 = the sheet's first data row, col 0 = its first column, as app_status shows), and a filtered or sorted sheet counts visible rows. " +
+            "Commands: sheet {sheet}; setStyle {sheet, ranges:[[r1,c1,r2,c2]], style:{bold, italic, underline, fill:\"#RRGGBB\", fontColor:\"#RRGGBB\", numberFormat, align, border:\"all|outside|bottom|none\"}}; " +
+            "clearCells {sheet, ranges, what:\"contents|formats|all\"}; fill {sheet, from:[r1,c1,r2,c2], to:[r1,c1,r2,c2], copy}; " +
+            "setFilter {sheet, col, condition:{kind:\"values\", include:[...], blanks} or {kind:\"number\", op:\"gt|ge|lt|le|eq|ne|between\", a, b} or {kind:\"text\", op:\"contains|begins|ends|eq|ne\", value}}; clearFilters {sheet}; " +
+            "setSort {sheet, keys:[{col, desc}]}; find {query, matchCase, sheet}; replace {sheet, query, replacement, matchCase, all}; setColWidth {sheet, col, px}; setFreeze {sheet, rows, cols}; " +
+            "undo {sheet}; redo {sheet}; save {saveAs:false}; and the data engine's commands, such as data.views.list, data.recipes.run {id}, data.dashboards.list.",
+            new JsonObject { ["command"] = Str("Command name, such as setSort."), ["args"] = new JsonObject { ["type"] = "object", ["description"] = "The command's arguments." } }, "command"),
+    };
+    static JsonObject Write(string name, string description, JsonObject properties, params string[] required)
+    { var t = Tool(name, description, properties, required); t["annotations"] = new JsonObject { ["readOnlyHint"] = false, ["destructiveHint"] = false, ["openWorldHint"] = false }; return t; }
+
+    static JsonArray StoreTools() => new()
     {
         Tool("list_tables", "Lists every table and report type in ExcelApp's store with its row count and columns.", new JsonObject()),
         Tool("describe_table", "Shows a table's columns with their types (number, text, date, bool) and a few sample rows.",
@@ -74,19 +107,49 @@ public sealed class McpServer
     {
         try
         {
+            AgentData Store() => data ?? throw new UserError(storeProblem);
+            ExcelApp.Agent.IAppLink App() => app ?? throw new UserError("Unknown tool: " + name + ".");
             object answer = name switch
             {
-                "list_tables" => data.Tables(),
-                "describe_table" => data.Describe(Str(args, "table"), Int(args, "sample_rows") ?? 5),
-                "query" => data.Query(Str(args, "sql"), Int(args, "max_rows") ?? AgentData.DefaultRows),
-                _ => throw new UserError("Unknown tool: " + name + ". Tools: list_tables, describe_table, query."),
+                "list_tables" => Store().Tables(),
+                "describe_table" => Store().Describe(Text(args, "table"), Int(args, "sample_rows") ?? 5),
+                "query" => Store().Query(Text(args, "sql"), Int(args, "max_rows") ?? AgentData.DefaultRows),
+                "app_status" => Status(App().Call("workbook", Empty())),
+                "read_range" => App().Call("agent.read", Where(args, "range", "range")),
+                "write_range" => App().Call("agent.write", Where(args, "start", "start", ("values", args["values"] ?? throw new UserError("The argument \"values\" is missing.")))),
+                "run_command" => App().Call(Text(args, "command"), JsonSerializer.SerializeToElement(args["args"] as JsonObject ?? new JsonObject())),
+                _ => throw new UserError("Unknown tool: " + name + "."),
             };
             return Content(JsonSerializer.Serialize(answer, AgentData.JsonOptions), false);
         }
         catch (UserError e) { return Content(e.Message, true); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { return Content("The store could not be read (" + e.GetType().Name + "). Try again in a moment.", true); }
     }
-    static string Str(JsonObject a, string key) => a[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : throw new UserError($"The argument \"{key}\" is missing.");
+    static JsonElement Empty() => JsonSerializer.SerializeToElement(new { });
+    /// <summary>Splits "Sheet1!B2" into the sheet and the address; a separate "sheet" argument also works.</summary>
+    static JsonElement Where(JsonObject args, string key, string name, params (string Key, JsonNode Value)[] more)
+    {
+        string text = Text(args, key); string? sheet = args["sheet"] is JsonValue sv && sv.TryGetValue<string>(out var sn) ? sn : null;
+        int bang = text.LastIndexOf('!');
+        if (bang > 0) { sheet = text[..bang].Trim().Trim('\'').Replace("''", "'"); text = text[(bang + 1)..]; }
+        var o = new JsonObject { [name] = text };
+        if (sheet != null) o["sheet"] = sheet;
+        foreach (var (k, v) in more) o[k] = v.DeepClone();
+        return JsonSerializer.SerializeToElement(o);
+    }
+    /// <summary>The workbook summary an agent needs: no per-column widths.</summary>
+    static object Status(JsonElement w)
+    {
+        if (w.ValueKind != JsonValueKind.Object) return new { open = false };
+        var sheets = w.GetProperty("sheets").EnumerateArray().Select(s =>
+        {
+            int rows = s.GetProperty("rows").GetInt32(), cols = s.GetProperty("cols").GetInt32(), fr = s.GetProperty("firstRow").GetInt32(), fc = s.GetProperty("firstCol").GetInt32();
+            return new { index = s.GetProperty("index").GetInt32(), name = s.GetProperty("name").GetString(), rows, cols, firstRow = fr, firstCol = fc,
+                         used = rows == 0 || cols == 0 ? "" : ExcelApp.Agent.A1.Format(fr, fc, fr + rows - 1, fc + cols - 1), hidden = s.GetProperty("hidden").GetBoolean() };
+        }).ToArray();
+        return new { open = true, name = w.GetProperty("name").GetString(), dirty = w.GetProperty("dirty").GetBoolean(), currentSheet = w.GetProperty("currentSheet").GetInt32(), sheets };
+    }
+    static string Text(JsonObject a, string key) => a[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : throw new UserError($"The argument \"{key}\" is missing.");
     static int? Int(JsonObject a, string key) => a[key] is JsonValue v && v.TryGetValue<int>(out var n) ? n : a[key] is JsonValue d && d.TryGetValue<double>(out var x) ? (int)x : null;
     static JsonObject Content(string text, bool error) => new() { ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }), ["isError"] = error };
 
