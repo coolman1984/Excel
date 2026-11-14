@@ -1,8 +1,25 @@
-# AI access to the data store
+# AI agents in ExcelApp
 
-The owner decided on 2026-11-14 that AI may read all the data, cell values included (README, "The rule").
-ExcelApp gives an AI agent **direct, read-only** access to its store, with no export and no opening of Excel files.
-It speaks SQL, and it runs on the same engine as the Data mode, so a question reads only the columns it uses.
+The owner decided on 2026-11-14 that AI may see all the data, cell values included (README, "The rule"), and that the
+agent is a CLI agent (Claude Code or Codex) connected to ExcelApp, with no API key. An agent gets:
+- **the data store, read-only, through SQL:** no export and no opening of Excel files. It runs on the Data mode's engine,
+  so a question reads only the columns it uses.
+- **the workbook open in the window, read and write:** cells by Excel address, plus every command of the window.
+
+## The Agent panel (inside ExcelApp)
+
+Press **✦ Agent** in the title bar. Choose **Claude Code** or **Codex**, write what you want in your own words, and the
+agent does it in ExcelApp. You can see each step it takes (which tool, which range or SQL), stop it at any moment, and
+start a new conversation. ExcelApp holds no API key. It runs the agent CLI you have installed and signed in to on
+this computer:
+
+- Claude Code: `npm install -g @anthropic-ai/claude-code`, then run `claude` once in a terminal to sign in.
+- Codex: `npm install -g @openai/codex`, then run `codex` once to sign in.
+
+ExcelApp finds them on PATH, in `%APPDATA%\npm` or in `~\.local\bin`. To use another location, set `EXCELAPP_CLAUDE` or
+`EXCELAPP_CODEX` to the full path. The agent gets only ExcelApp's tools (Claude Code runs with
+`--strict-mcp-config --allowedTools mcp__excelapp`). Its changes appear in the grid at once, they are one undo step
+each, and they stay unsaved until you save or ask the agent to save.
 
 ## Connect an AI app (MCP)
 
@@ -24,16 +41,20 @@ Replace `C:\path\to\Excel` below with the folder that holds this repository.
 claude mcp add excelapp -- "C:\path\to\Excel\ExcelApp\app\ExcelApp.exe" --mcp
 ```
 
-The server offers three tools, all read-only:
+The server offers these tools:
 
-| Tool | What it returns |
+| Tool | What it does |
 |---|---|
-| `list_tables` | Every report type and table, with row counts and columns |
+| `list_tables` | Every report type and table in the data store, with row counts and columns |
 | `describe_table` | One table's columns and types (number, text, date, bool), plus sample rows |
 | `query` | The answer to one SQL `SELECT`: columns, rows (1,000 by default, up to 100,000) and how many rows matched |
+| `app_status` | The workbook open in the ExcelApp window: name, unsaved changes, sheets and their used ranges |
+| `read_range` | Cells of the open workbook as Excel shows them, with formulas (`Sheet1!A1:D20`, at most 20,000 cells) |
+| `write_range` | Writes rows of values from a cell: numbers, text, true/false, null to clear, `=...` formulas. One undo step |
+| `run_command` | Any command of the window: styles, filters, sorting, fill, find and replace, undo, save, the data engine's `data.*` commands |
 
-The app does not have to be open. The server reads the store files directly, and the app can keep loading new files
-while an agent reads.
+The store tools work without the window. The workbook tools reach the open window through a named pipe that only your
+Windows account can open, and they say "ExcelApp is not open" when no window is running.
 
 ## From a terminal or a script
 
