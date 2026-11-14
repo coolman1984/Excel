@@ -4,7 +4,7 @@ import { THEME_ROWS, STANDARD } from "../palette";
 import { NUMBER_FORMATS } from "../numberFormat";
 import type { CellStyle } from "../types";
 
-export type TabName = "File" | "Home" | "Data" | "View";
+export type TabName = "File" | "Home" | "Insert" | "Data" | "View";
 
 export interface RibbonProps {
     activeTab: TabName;
@@ -37,6 +37,8 @@ export interface RibbonProps {
     onAutoSum: () => void;
     onFormatCells: () => void;
     onStructure: (kind: "insertRows" | "insertCols" | "deleteRows" | "deleteCols") => void;
+    onChart: (type: string) => void;
+    onPivot?: () => void;
     onClearAll: () => void;
     onClearContents: () => void;
     onClearFormats: () => void;
@@ -178,7 +180,7 @@ export function Ribbon(props: RibbonProps): React.ReactElement {
     return (
         <div className="ribbon" data-testid="ribbon">
             <div className="tabStrip">
-                {(["File", "Home", "Data", "View"] as TabName[]).map((t) => (
+                {(["File", "Home", "Insert", "Data", "View"] as TabName[]).map((t) => (
                     <button key={t} type="button" className={"tab" + (activeTab === t ? " active" : "")} onClick={() => onTab(t)} data-testid={"tab-" + t}>
                         {t}
                     </button>
@@ -191,6 +193,7 @@ export function Ribbon(props: RibbonProps): React.ReactElement {
             {!collapsed && activeTab !== "File" && (
                 <div className="ribbonBody" data-testid="ribbon-body">
                     {activeTab === "Home" && <HomeTab {...props} />}
+                    {activeTab === "Insert" && <InsertTab {...props} />}
                     {activeTab === "Data" && <DataTab {...props} />}
                     {activeTab === "View" && <ViewTab {...props} />}
                 </div>
@@ -372,6 +375,32 @@ function HomeTab(p: RibbonProps): React.ReactElement {
                             </div>
                         )}
                     </Menu>
+                </div>
+            </Group>
+        </>
+    );
+}
+
+const CHART_BUTTONS: [string, string, string][] = [
+    ["column", "Column", "Compare values across categories"], ["bar", "Bar", "Compare values with long category names"],
+    ["line", "Line", "Show a trend over time"], ["area", "Area", "Show a trend and its size"],
+    ["pie", "Pie", "Show parts of a whole (one series)"], ["scatter", "Scatter", "Show how two numbers relate"],
+];
+
+function InsertTab(p: RibbonProps): React.ReactElement {
+    const d = !p.enabled;
+    return (
+        <>
+            {p.onPivot && (
+                <Group label="Tables">
+                    <RButton label="PivotTable" big disabled={d} title="Summarise the selected data in a PivotTable" onClick={p.onPivot} testid="btn-pivot" />
+                </Group>
+            )}
+            <Group label="Charts">
+                <div className="rrow chartButtons">
+                    {CHART_BUTTONS.map(([t, label, tip]) => (
+                        <RButton key={t} label={label} disabled={d} title={`${label} chart: ${tip}. Select the data first, with its header row.`} onClick={() => p.onChart(t)} testid={"chart-" + t} />
+                    ))}
                 </div>
             </Group>
         </>

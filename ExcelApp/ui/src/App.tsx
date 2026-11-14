@@ -12,6 +12,7 @@ import { Dialogs } from "./dialogHost";
 import { increaseDecimals, decreaseDecimals, PERCENT_CODE, COMMA_CODE, GENERAL } from "./numberFormat";
 import { SHORTCUT_FORMATS, fillRange, todayInput, timeInput } from "./shortcuts";
 import { AgentPanel } from "./agent/AgentPanel";
+import { ChartLayer, type ChartWire } from "./charts/ChartLayer";
 import type { WorkbookInfo, SheetInfo, Stats, CellStyle, Condition, SortKey } from "./types";
 
 type AppState = "empty" | "opening" | "ready";
@@ -96,6 +97,14 @@ export function App(): React.ReactElement {
     const sheetRef = React.useRef(0);
     sheetRef.current = sheetIndex;
     const [agentOpen, setAgentOpen] = React.useState(false);
+    // Charts of the current sheet, read again after anything that can change their numbers or cards
+    const [charts, setCharts] = React.useState<ChartWire[]>([]);
+    const chartsFor = React.useRef({ state: "", sheet: 0 });
+    const loadCharts = React.useCallback(async () => {
+        const { state: st, sheet: sh } = chartsFor.current;
+        if (st !== "ready") { setCharts([]); return; }
+        try { const r: any = await call("chart.list", { sheet: sh }); setCharts(r?.charts ?? []); } catch { setCharts([]); }
+    }, []);
 
     React.useEffect(() => {
         const offs: (() => void)[] = [];
@@ -230,11 +239,12 @@ export function App(): React.ReactElement {
     const refreshView = React.useCallback(() => setViewKey((k) => k + 1), []);
 
     const applyChanged = React.useCallback((res: { changed?: number[][]; recalc?: boolean } | null | undefined) => {
+        void loadCharts();
         // With formulas on the sheet any cell can show a new result, so read the visible rows again.
         if (res?.recalc) { gridRef.current?.refresh(); return; }
         const changed = res?.changed;
         if (changed && changed.length > 0) gridRef.current?.invalidateCells(changed);
-    }, []);
+    }, [loadCharts]);
 
     const confirmLeave = React.useCallback((next: () => Promise<void>) => {
         if (!live.current.dirty) { void next().catch((e: Error) => setStatus(e.message)); return; }
@@ -398,6 +408,20 @@ export function App(): React.ReactElement {
         if (r.structure) await reloadStructure(r.sheet);
         refreshView();
     }, [sheet, sheetIndex, refreshView, selectSheet, reloadStructure]);
+
+    chartsFor.current = { state, sheet: sheetIndex };
+    React.useEffect(() => { void loadCharts(); }, [loadCharts, state, sheetIndex, viewKey]);
+
+    const addChart = React.useCallback(async (type: string) => {
+        if (!sheet) return;
+        try {
+            await call("chart.add", { sheet: sheetIndex, type, range: [selection.r1, selection.c1, selection.r2, selection.c2] });
+            await loadCharts();
+            setStatus("Chart added");
+        } catch (e: any) {
+            setDialog({ name: "Message", props: { title: "Microsoft Excel", text: e?.message ?? String(e), onClose: () => setDialog(null) } });
+        }
+    }, [sheet, sheetIndex, selection, loadCharts]);
 
     const doStructure = React.useCallback(async (kind: "insertRows" | "insertCols" | "deleteRows" | "deleteCols") => {
         if (!sheet) return;
@@ -783,6 +807,7 @@ export function App(): React.ReactElement {
                 onAutoSum={onAutoSum}
                 onFormatCells={onFormatCells}
                 onStructure={(k) => void doStructure(k)}
+                onChart={(t) => void addChart(t)}
                 onClearAll={onClearAll}
                 onClearContents={onClearContents}
                 onClearFormats={onClearFormats}
@@ -878,6 +903,7 @@ export function App(): React.ReactElement {
                             onPaint={handlePaint}
                             viewKey={viewKey}
                         />
+                        <ChartLayer charts={charts} onChanged={() => void loadCharts()} />
                     </div>
                     <SheetTabs sheets={workbook?.sheets ?? []} activeIndex={sheetIndex} onSelect={selectSheet} onUnhide={selectSheet} />
                     <StatusBar status={status} filterInfo={filterInfo} stats={stats} zoom={zoom} onZoom={setZoomPct} />

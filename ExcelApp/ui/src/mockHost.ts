@@ -124,6 +124,23 @@ export class MockHost {
         return () => set!.delete(handler);
     }
 
+    private charts: { id: string; sheet: number; type: string; title: string | null; r1: number; c1: number; r2: number; c2: number; x: number; y: number; w: number; h: number }[] = [];
+    private chartSeq = 0;
+    /** The chart's points from the mock cells: a text header row names the series, a text first column holds the categories. */
+    private chartWire(c: { id: string; sheet: number; type: string; title: string | null; r1: number; c1: number; r2: number; c2: number; x: number; y: number; w: number; h: number }): any {
+        const cell = (r: number, k: number) => this.cellAt(r, k);
+        const header = c.r2 > c.r1 && cell(c.r1, c.c2).kind !== 1;
+        const top = header ? c.r1 + 1 : c.r1;
+        const catCol = c.c2 > c.c1 && Array.from({ length: c.r2 - top + 1 }, (_, i) => cell(top + i, c.c1)).every((x) => x.kind !== 1);
+        const first = catCol ? c.c1 + 1 : c.c1;
+        const n = Math.min(1000, c.r2 - top + 1);
+        const categories = Array.from({ length: n }, (_, i) => (catCol ? cell(top + i, c.c1).text : String(i + 1)));
+        const series = [];
+        for (let k = first; k <= c.c2 && series.length < 8; k++)
+            series.push({ name: header ? cell(c.r1, k).text || `Series ${series.length + 1}` : `Series ${series.length + 1}`, values: Array.from({ length: n }, (_, i) => { const v = cell(top + i, k); const num = parseFloat(String(v.text).replace(/[$,%]/g, "")); return v.kind === 1 && isFinite(num) ? num : null; }) });
+        return { ...c, range: `${this.letter(c.c1)}${c.r1 + 1}:${this.letter(c.c2)}${c.r2 + 1}`, categories, series, xValues: null, truncated: false };
+    }
+
     /** Inserts or deletes rows or columns of the current sheet (the browser preview; the real work is in the C# host). */
     private restructure(args: any, rows: boolean, insert: boolean): any {
         const s = this.sheets[args.sheet ?? this.current];
@@ -456,6 +473,20 @@ export class MockHost {
             case "deleteRows": return this.restructure(args, true, false);
             case "insertCols": return this.restructure(args, false, true);
             case "deleteCols": return this.restructure(args, false, false);
+            case "chart.list": return { charts: this.charts.filter((c) => args.sheet == null || c.sheet === args.sheet).map((c) => this.chartWire(c)) };
+            case "chart.add": {
+                const [r1, c1, r2, c2] = args.range;
+                if (r1 === r2 && c1 === c2) throw new Error("Select the data to chart: a header row and the numbers below it, such as A1:C13.");
+                const c = { id: "c" + (++this.chartSeq), sheet: args.sheet ?? this.current, type: args.type ?? "column", title: args.title ?? null, r1: Math.min(r1, r2), c1: Math.min(c1, c2), r2: Math.max(r1, r2), c2: Math.max(c1, c2), x: 120 + 28 * this.charts.length, y: 90 + 28 * this.charts.length, w: 520, h: 320 };
+                this.charts.push(c); this.dirty = true;
+                return { chart: this.chartWire(c), dirty: true };
+            }
+            case "chart.update": {
+                const c = this.charts.find((x) => x.id === args.id); if (!c) throw new Error("That chart does not exist any more.");
+                for (const k of ["type", "title", "x", "y", "w", "h"]) if (k in args) (c as any)[k] = args[k];
+                this.dirty = true; return { chart: this.chartWire(c), dirty: true };
+            }
+            case "chart.delete": this.charts = this.charts.filter((x) => x.id !== args.id); this.dirty = true; return { deleted: args.id, dirty: true };
             case "agent.status":
                 return { claude: true, codex: false, running: this.agentTimers.length > 0 ? "claude" : null };
             case "agent.start":

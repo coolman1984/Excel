@@ -2,6 +2,7 @@
 
 ## 2026-11-14 (continued)
 
+- **Charts:** Insert tab, column, bar, line, area, pie and scatter charts from a selected range (Excel's rules: a text header names the series, a text or date first column holds the categories). Hand-drawn SVG with the validated colour palette, a hover tooltip, a legend for two or more series and a Data table view; cards move, resize, rename (double-click) and change type. Charts follow edits (formulas included), move with inserted and deleted rows, are undoable, kept in the journal, and saved into the file as real Excel charts. The agent can add them (chart.add).
 - **Insert and delete rows and columns:** the ribbon's Insert and Delete menus, Ctrl++ and Ctrl+-, and the agent's run_command (insertRows, deleteRows, insertCols, deleteCols). Each logical row or column maps to the fast copy's (a new one is blank), formulas move their references as Excel does (ranges grow and shrink, deleted cells become #REF!), one undo step each, the unsaved-edits journal keeps them, and Save replays them in Excel before writing the cells. Offline: two new suites (structure, layout); live checks are written for the laptop.
 
 ## 2026-11-14

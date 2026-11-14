@@ -782,3 +782,30 @@ body {
 .agentInput button { padding: 7px 14px; border-radius: 6px; border: 1px solid #107c41; background: #107c41; color: #fff; cursor: pointer; }
 .agentInput button:disabled { opacity: 0.5; cursor: default; }
 .agentInput .agentStop { background: #fff; color: #a4262c; border-color: #a4262c; }
+
+/* Charts over the sheet */
+.gridArea { position: relative; }
+.chartLayer { position: absolute; inset: 0; pointer-events: none; z-index: 40; overflow: hidden; }
+.chartCard {
+    position: absolute; pointer-events: auto; display: flex; flex-direction: column;
+    background: #fcfcfb; border: 1px solid #d9d8d4; border-radius: 6px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+}
+.chartHead { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #ecebe7; cursor: move; }
+.chartTitle { flex: 1; min-width: 0; font: 600 13px inherit; color: #0b0b0b; border: 1px solid transparent; background: transparent; padding: 2px 4px; border-radius: 3px; }
+.chartTitle:hover, .chartTitle:focus { border-color: #c9d3cb; background: #fff; }
+.chartHead select, .chartHead button { font-size: 12px; padding: 2px 6px; border: 1px solid #d0cfca; background: #fff; border-radius: 4px; cursor: pointer; color: #52514e; }
+.chartHead button.on { background: #e8f2ec; border-color: #107c41; color: #107c41; }
+.chartBody { flex: 1; min-height: 0; padding: 4px 8px 0; overflow: hidden; }
+.chartFoot { font-size: 11px; color: #8a8985; padding: 2px 10px 6px; }
+.chartResize { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #c4c3be 50%); border-bottom-right-radius: 6px; }
+.chartTip { position: absolute; pointer-events: none; background: #fff; border: 1px solid #d9d8d4; border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12); padding: 6px 8px; font-size: 12px; color: #0b0b0b; min-width: 120px; z-index: 2; }
+.chartTipTitle { font-weight: 600; margin-bottom: 3px; }
+.chartTipRow { display: flex; align-items: center; gap: 6px; color: #52514e; }
+.chartTipRow b { margin-left: auto; color: #0b0b0b; font-weight: 600; padding-left: 10px; }
+.chartTipKey { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.chartTable { height: 100%; overflow: auto; font-size: 12px; }
+.chartTable table { border-collapse: collapse; width: 100%; }
+.chartTable th, .chartTable td { padding: 3px 8px; border-bottom: 1px solid #efeeea; text-align: right; color: #0b0b0b; }
+.chartTable th:first-child, .chartTable td:first-child { text-align: left; color: #52514e; }
+.chartTable th { position: sticky; top: 0; background: #f6f6f4; font-weight: 600; }
+.chartTitleText { flex: 1; min-width: 0; font-weight: 600; font-size: 13px; color: #0b0b0b; padding: 2px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: none; }

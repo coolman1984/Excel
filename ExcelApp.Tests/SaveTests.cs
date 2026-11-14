@@ -89,7 +89,8 @@ public static class SaveTests
             // Inserted and deleted rows and columns are replayed in Excel first; the cells are then written at the new addresses.
             var sjob = new SaveBack.Job { Source = source, Target = structTarget, SameFile = false,
                 Structure = new() { new SaveBack.Structure { Sheet = "syn-one", Rows = true, At = 2, Count = 1, Insert = true }, new SaveBack.Structure { Sheet = "syn-one", Rows = false, At = 5, Count = 1, Insert = false } },
-                Edits = new() { new SaveBack.Edit { Sheet = "syn-one", Row = 2, Col = 1, Kind = EditKind.Text, Text = "inserted" } } };
+                Edits = new() { new SaveBack.Edit { Sheet = "syn-one", Row = 2, Col = 1, Kind = EditKind.Text, Text = "inserted" } },
+                Charts = new() { new SaveBack.Chart { Sheet = "syn-one", Type = "column", Title = "syn chart", Row1 = 1, Col1 = 1, Row2 = 4, Col2 = 3 } } };
             output = new StringWriter();
             int scode = SaveBack.Run(new StringReader(JsonSerializer.Serialize(sjob)), output);
             check("save structure result", scode == 0, "code=" + scode);
@@ -98,6 +99,8 @@ public static class SaveTests
                 check("save structure: the inserted row holds the new cell", (string)ws.Cells[2, 1].Value2 == "inserted", "");
                 check("save structure: the old row moved down and Excel moved its formula", (string)ws.Cells[3, 1].Value2 == "text" && (string)ws.Cells[3, 3].Formula == "=B3*2", (string)ws.Cells[3, 3].Formula);
                 check("save structure: the deleted column is gone", ws.Cells[1, 5].Value2 == null && (string)ws.Cells[1, 4].Value2 == "money", "");
+                dynamic charts = ws.ChartObjects();
+                check("save chart: an Excel chart with its title", (int)charts.Count == 1 && (string)charts.Item(1).Chart.ChartTitle.Text == "syn chart", "");
             });
             byte[] hash = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(source));
             var attr = File.GetAttributes(source);

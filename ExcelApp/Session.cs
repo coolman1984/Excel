@@ -99,6 +99,7 @@ public sealed partial class Session : IDisposable
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
         RegisterAgent(h);  // AI agents: read and write by Excel address (SessionAgent.cs)
+        RegisterCharts(h); // charts (SessionCharts.cs)
         Agents?.Register(h); // the Agent panel: Claude Code CLI / Codex CLI
         Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }
@@ -1079,7 +1080,7 @@ public sealed partial class Session : IDisposable
 
     string BuildJob(CacheData c, string source, string target, bool same)
     {
-        var edits = new List<object>(); var widths = new List<object>(); var freeze = new List<object>(); var structure = new List<object>();
+        var edits = new List<object>(); var widths = new List<object>(); var freeze = new List<object>(); var structure = new List<object>(); var charts = new List<object>();
         lock (editLock)
         {
             foreach (var op in Edits.Ops)
@@ -1098,8 +1099,13 @@ public sealed partial class Session : IDisposable
             }
             foreach (var kv in Edits.ColWidths) { var d = c.Sheets[kv.Key.Sheet]; widths.Add(new { sheet = d.Name, col = d.FirstCol + kv.Key.Col, px = kv.Value }); }
             foreach (var kv in Edits.Freeze) freeze.Add(new { sheet = c.Sheets[kv.Key].Name, rows = kv.Value.Rows, cols = kv.Value.Cols });
+            foreach (var ch in Edits.Charts)
+            {
+                var d = c.Sheets[ch.Sheet];
+                charts.Add(new { sheet = d.Name, type = ch.Type, title = ch.Title, row1 = d.FirstRow + ch.R1, col1 = d.FirstCol + ch.C1, row2 = d.FirstRow + ch.R2, col2 = d.FirstCol + ch.C2, width = ch.W, height = ch.H });
+            }
         }
-        return JsonSerializer.Serialize(new { source, target, sameFile = same, expectedLength = same ? (long?)c.SourceLength : null, expectedTicks = same ? (long?)c.SourceTicks : null, edits, colWidths = widths, freeze, structure },
+        return JsonSerializer.Serialize(new { source, target, sameFile = same, expectedLength = same ? (long?)c.SourceLength : null, expectedTicks = same ? (long?)c.SourceTicks : null, edits, colWidths = widths, freeze, structure, charts },
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
     }
 }
