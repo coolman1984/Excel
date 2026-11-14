@@ -18,10 +18,14 @@ ExcelApp is a desktop editor that looks and behaves like Excel. A C# host opens 
 
 **What it does not do:** formulas are saved to Excel as typed, and Excel's own result is what the saved file holds; no array formulas, charts, pictures, pivot tables or macros; no editing of the first open's slow part: the first open of a file still waits for Excel to read it, later opens use the copy. .NET 8 runs out of support on 2026-11-10; moving to .NET 10 is a one-line change in the project files.
 
+**AI access:** `ExcelApp.exe --mcp` lets an AI app (Claude Desktop, Claude Code) list, describe and query the data store directly with SQL, read-only; `--query "SELECT ..."` does the same from a terminal. See `docs\AI-ACCESS.md`.
+
 **Tests:** `powershell -File check.ps1` (add `-Offline` to skip the tests that start Excel).
 ## The rule
 
-The fast copy holds data **without** NASCA protection. The owner, acting as IT manager, approved it on 2026-11-04 for **one laptop's local disk only**. Nothing may leave that machine.
+The fast copy holds data **without** NASCA protection. The owner, acting as IT manager, approved it on 2026-11-04 for **one laptop's local disk only**. Nothing may leave that machine, with one exception below.
+
+**AI (owner's decision, 2026-11-14):** AI may read all the data, cell values included, through ExcelApp's read-only agent access (`--query`, `--mcp`). The owner accepted that an AI running in the cloud receives the values it reads. AI access never writes to the store, and the files and caches themselves still stay on the laptop.
 
 - Copies are written only to `D:\ExcelViewerCache`, locked to the owner's account. Every write goes through `ExcelViewer\Core\CachePolicy.cs`, which refuses any other place and any other PC.
 - Excel through COM is the only reader of a protected file. NASCA on the source is never stripped or avoided.

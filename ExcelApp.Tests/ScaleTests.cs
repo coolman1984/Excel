@@ -11,7 +11,9 @@ public static class ScaleTests
         readonly Table table; public readonly List<IReadOnlyCollection<string>?> Asked = new();
         public Recording(Table table) => this.table = table;
         public Table Get(TableRef r) => Get(r, null);
-        public Table Get(TableRef r, IReadOnlyCollection<string>? columns) { Asked.Add(columns); return table; }
+        public Table Get(TableRef r, IReadOnlyCollection<string>? columns) { Asked.Add(columns); return columns == null ? table : new Table(table.Name, table.Columns.Where(c => columns.Contains(c.Name, StringComparer.OrdinalIgnoreCase)).ToArray()); }
+        public readonly List<int[]> RowsAsked = new();
+        public Table GetRows(TableRef r, IReadOnlyCollection<string>? columns, int[] rows) { RowsAsked.Add(rows); return new Table(table.Name, table.Columns.Select(c => ExcelApp.Data.Query.Engine.Gather(c, rows)).ToArray()); }
         public IReadOnlyList<TableInfo> List() => Array.Empty<TableInfo>();
         public SourceInfo? SourceOf(int id) => null;
         public int SaveAsVersion(string reportTypeId, string period, Table data, string note) => throw new NotSupportedException();
@@ -39,8 +41,11 @@ public static class ScaleTests
         check("scale: a projection asks only for its columns", Set(rec.Asked[0]).SetEquals(new[] { "Region", "_v", "_r" }), string.Join(",", Set(rec.Asked[0])));
 
         rec.Asked.Clear();
-        Engine.Run(new QuerySpec { Source = new("table", "t") }, rec, CancellationToken.None);
-        check("scale: a question that shows every column asks for all", rec.Asked[0] == null, "");
+        using var big = JsonDocument.Parse("{\"op\":\"gt\",\"col\":\"Sales\",\"value\":6}");
+        var wide = Engine.Run(new QuerySpec { Source = new("table", "t"), Where = big.RootElement, Sort = new() { new("Cost", true) }, Computed = new() { new("Twice", "Sales * 2") }, Limit = 1 }, rec, CancellationToken.None);
+        check("scale: SELECT * computes on its own columns first", rec.Asked.Count == 1 && Set(rec.Asked[0]).SetEquals(new[] { "Sales", "Cost", "_v", "_r" }), string.Join(",", Set(rec.Asked[0])));
+        check("scale: SELECT * fetches the other columns for the answer rows only", rec.RowsAsked.Count == 1 && rec.RowsAsked[0].SequenceEqual(new[] { 2 }), rec.RowsAsked.Count == 0 ? "none" : string.Join(",", rec.RowsAsked[0]));
+        check("scale: SELECT * answer is complete and in order", wide.Table.Rows == 1 && wide.Total == 2 && string.Join(",", wide.Table.Columns.Select(c => c.Name)) == "Sales,Region,Cost,Unused,Twice" && wide.Table["Region"]!.Text(0) == "N" && wide.Table["Twice"]!.Num(0) == 60, string.Join(",", wide.Table.Columns.Select(c => c.Name)));
 
         rec.Asked.Clear();
         Engine.Run(new QuerySpec { Source = new("table", "t"), Joins = new() { new JoinSpec { Right = new("table", "r"), On = new() { new("Region", "Region") }, Prefix = "r_" } }, Columns = new() { "Sales", "r_Cost" } }, rec, CancellationToken.None);
@@ -60,6 +65,24 @@ public static class ScaleTests
         check("scale: union text stays dictionary-coded", region != null && region.Dict.Length == 3 && region.Text(0) == "N" && region.Text(2) == "S" && region.Text(3) == "E", region == null ? "not text" : string.Join(",", region.Dict));
         var all = provider.Get(new TableRef("report", report));
         check("scale: asking for everything still gives everything", all["Unused"] != null && all.Rows == 4 && all["Sales"]!.Num(3) == 4, "");
+        // rows fetched across periods, in the answer's order, with a column missing in one period
+        provider.SaveAsVersion(report, "2026-03", new Table("p", new Column[] { TextColumn.From("Region", new[] { "W" }), new NumberColumn("Sales", new[] { 5d }, null) }), "");
+        provider.Invalidate(report);
+        var picked = provider.GetRows(new TableRef("report", report), null, new[] { 4, 0, 3 });
+        check("scale: rows fetched across periods keep the asked order", picked.Rows == 3 && picked["Region"]!.Text(0) == "W" && picked["Region"]!.Text(1) == "N" && picked["Sales"]!.Num(2) == 4, picked.Rows + " " + (picked["Region"]?.Text(0) ?? "?"));
+        check("scale: a column missing in a period reads as empty", picked["Unused"] != null && picked["Unused"]!.IsNull(0) && picked["Unused"]!.Num(1) == 9, "");
+        var lazy = TableFile.Open(root, "reports/scale/2026-01/v1.xvt");
+        var direct = lazy.LoadRows(new[] { "Region", "Sales" }, new[] { 1, 0 });
+        check("scale: one file reads single rows", direct["Region"]!.Text(0) == "S" && direct["Sales"]!.Num(1) == 1 && direct["Unused"] == null, "");
+        var nullable = new Table("n", new Column[] { new NumberColumn("D", new[] { 1d, 2, 3 }, new[] { false, true, false }, ColType.Date), new BoolColumn("B", new sbyte[] { 1, -1, 0 }), TextColumn.From("T", new[] { "a", null, "c" }) });
+        TableFile.Write(root, "n.xvt", nullable, new Dictionary<string, string>());
+        var nrows = TableFile.Open(root, "n.xvt").LoadRows(null, new[] { 2, 1 });
+        check("scale: single-row reads keep nulls, dates, bools and text", nrows["D"]!.Type == ColType.Date && nrows["D"]!.Num(0) == 3 && nrows["D"]!.IsNull(1) && nrows["B"]!.Num(0) == 0 && nrows["B"]!.IsNull(1) && nrows["T"]!.Text(0) == "c" && nrows["T"]!.IsNull(1), "");
+        // another process (the app) loads a new version: a long-running reader (the AI server) sees it without being told
+        var reader = new TableProvider(root, new Catalog(root));
+        int before = reader.Get(new TableRef("report", report), new[] { "Sales" }).Rows;
+        new TableProvider(root, new Catalog(root)).SaveAsVersion(report, "2026-04", new Table("p", new Column[] { new NumberColumn("Sales", new[] { 6d, 7 }, null) }), "");
+        check("scale: a new version from another process is seen at once", reader.Get(new TableRef("report", report), new[] { "Sales" }).Rows == before + 2, before.ToString());
         for (int i = 0; i < 10; i++) provider.Get(new TableRef("report", report), new[] { "Sales", "C" + i });
         check("scale: the provider keeps only a few unions", provider.CachedCount <= TableProvider.MaxCached, provider.CachedCount.ToString());
     }

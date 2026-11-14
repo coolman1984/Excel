@@ -1,4 +1,5 @@
-// Modes: (none) window; --build <file>; --save; --selftest <made-up file> <png folder>; --dev <url>.
+// Modes: (none) window; --build <file>; --save; --selftest <made-up file> <png folder>; --dev <url>;
+// AI agent access (read-only): --mcp (MCP server on stdio), --query "<SELECT ...>" [--max N], --tables.
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -10,11 +11,13 @@ namespace ExcelApp;
 static class Program
 {
     [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(int processId);
 
     [STAThread]
     static int Main(string[] a)
     {
         SetErrorMode(0x8003); // no Windows error box, ever
+        if (a.Length >= 1 && a[0] is "--mcp" or "--query" or "--tables") return AgentMode(a);
         bool unattended = a.Length >= 1 && a[0] is "--build" or "--save" or "--selftest" or "--export";
         if (a.Length == 2 && a[0] == "--export") { try { return ExcelApp.Data.ExportChild.Run(a[1]); } catch (Exception e) { Console.WriteLine("ERROR " + e.GetType().Name); return 1; } } // plan 4, lane A
         try
@@ -47,6 +50,44 @@ static class Program
             try { Log.Write("fatal " + e.GetType().Name); } catch (Exception) { }
             if (unattended) Console.WriteLine("ERROR " + e.GetType().Name);
             else try { MessageBox.Show("ExcelApp could not start (" + e.GetType().Name + ").", "ExcelApp"); } catch (Exception) { }
+            return 1;
+        }
+    }
+
+    /// <summary>Read-only access for an AI agent to the data store (owner's decision, 2026-11-14). Never opens a window or writes data.</summary>
+    static int AgentMode(string[] a)
+    {
+        bool mcp = a[0] == "--mcp";
+        if (!mcp) AttachConsole(-1);   // a typed command shows its answer in the console it came from
+        var utf8 = new UTF8Encoding(false);
+        using var o = new StreamWriter(Console.OpenStandardOutput(), utf8) { AutoFlush = true };
+        try
+        {
+            var root = ExcelApp.Data.StoreRoot.Production();
+            var api = new ExcelApp.Data.Agent.AgentData(new ExcelApp.Data.TableProvider(root, new ExcelApp.Data.Catalog(root)));
+            if (mcp) { new ExcelApp.Data.Agent.McpServer(api).Run(new StreamReader(Console.OpenStandardInput(), utf8), o); return 0; }
+            object answer;
+            if (a[0] == "--tables") answer = api.Tables();
+            else
+            {
+                if (a.Length < 2) { o.WriteLine("ERROR Usage: ExcelApp.exe --query \"SELECT ...\" [--max N]"); return 2; }
+                int max = ExcelApp.Data.Agent.AgentData.DefaultRows;
+                int at = Array.IndexOf(a, "--max");
+                if (at > 0 && (at + 1 >= a.Length || !int.TryParse(a[at + 1], NumberStyles.None, CultureInfo.InvariantCulture, out max))) { o.WriteLine("ERROR --max needs a whole number."); return 2; }
+                answer = api.Query(a[1], max);
+            }
+            o.WriteLine(System.Text.Json.JsonSerializer.Serialize(answer, ExcelApp.Data.Agent.AgentData.JsonOptions));
+            return 0;
+        }
+        catch (Exception e) when (e is UserError or CachePolicyException)
+        {
+            if (mcp) Console.Error.WriteLine(e.Message); else o.WriteLine("ERROR " + e.Message);
+            return 1;
+        }
+        catch (Exception e)
+        {
+            Log.Write("agent " + e.GetType().Name);
+            if (mcp) Console.Error.WriteLine("ExcelApp agent access stopped (" + e.GetType().Name + ")."); else o.WriteLine("ERROR " + e.GetType().Name);
             return 1;
         }
     }

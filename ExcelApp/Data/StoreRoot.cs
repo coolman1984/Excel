@@ -52,7 +52,10 @@ public abstract class FileRoot
         using var w = new StreamWriter(s, new System.Text.UTF8Encoding(false)); w.WriteLine(line);
     }
 
-    public FileStream OpenRead(string relative) => new(PathOf(relative), FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20);
+    // FileShare.Delete: a reader (the app, or an AI query in another process) never blocks the app from replacing a file.
+    public FileStream OpenRead(string relative) => new(PathOf(relative), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1 << 20);
+    /// <summary>A handle for reading single values at any offset (RandomAccess), without a read buffer.</summary>
+    public Microsoft.Win32.SafeHandles.SafeFileHandle OpenHandle(string relative) => File.OpenHandle(PathOf(relative), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
     public bool Exists(string relative) => File.Exists(PathOf(relative));
     public string ReadAllText(string relative) => File.ReadAllText(PathOf(relative));
     public void Delete(string relative) { string f = PathOf(relative); if (File.Exists(f)) File.Delete(f); }

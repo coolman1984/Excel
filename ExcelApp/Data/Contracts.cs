@@ -140,6 +140,10 @@ public interface ITableProvider
     /// <summary>The same table with only these columns loaded (plus lineage), so a question over 300 columns reads only what it uses.
     /// Null means every column. A provider may return more columns than asked; never fewer that exist.</summary>
     Table Get(TableRef r, IReadOnlyCollection<string>? columns) => Get(r);
+    /// <summary>Only these rows (row numbers of Get's table, in this order) of these columns (null = all). A wide answer reads its
+    /// 300 columns for the rows it shows instead of for every row.</summary>
+    Table GetRows(TableRef r, IReadOnlyCollection<string>? columns, int[] rows)
+    { var t = Get(r, columns); return new Table(t.Name, t.Columns.Select(c => ExcelApp.Data.Query.Engine.Gather(c, rows)).ToArray()); }
     IReadOnlyList<TableInfo> List();
     SourceInfo? SourceOf(int versionId);
     /// <summary>Stores a table as a new version of a report type's period (used by sandbox "keep", plan idea 15). Returns the period version number.</summary>

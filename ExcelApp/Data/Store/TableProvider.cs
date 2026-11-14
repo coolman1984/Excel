@@ -18,15 +18,46 @@ public sealed class TableProvider : ITableProvider
         var cat=catalog.Snapshot();
         if(reference.Kind=="version") {foreach(var report in cat.ReportTypes) foreach(var (period,p) in new Versions(root,report).Snapshot().Periods) {var v=p.Versions.FirstOrDefault(x=>x.VersionId.ToString(CultureInfo.InvariantCulture)==reference.Id); if(v!=null) return Open($"reports/{report}/{period}/v{v.Version}.xvt");} throw new UserError("The version was not found.");}
         if(reference.Kind!="report") throw new UserError("The table was not found.");
-        string baseKey=$"{reference.Id}|{reference.Truth}|{reference.AsOf}|{reference.Version}";
+        // The key holds the period files the report points to now, so a version loaded by another process (the app, while an AI
+        // agent reads) is never answered from an old union.
+        var files=ReportFiles(reference);
+        string baseKey=$"{reference.Id}|{reference.Truth}|{reference.AsOf}|{reference.Version}|{string.Join(";",files)}";
         string key=baseKey+"|"+(want==null?"*":string.Join(",",want.Select(x=>x.ToUpperInvariant()).OrderBy(x=>x,StringComparer.Ordinal)));
         lock(gate) {if(cached.TryGetValue(key,out var hit)) return hit; if(cached.TryGetValue(baseKey+"|*",out var full)) return full;}
         DateTime? time=reference.AsOf==null?null:DateTime.Parse(reference.AsOf,CultureInfo.InvariantCulture);
-        var state=new Versions(root,reference.Id).Snapshot(); var tables=new List<Table>();
-        foreach(var (period,p) in state.Periods.OrderBy(x=>x.Key,StringComparer.Ordinal)) {var v=Versions.Select(p,reference.Truth,time,reference.Version); if(v!=null) tables.Add(Open($"reports/{reference.Id}/{period}/v{v.Version}.xvt"));}
+        var tables=files.Select(Open).ToList();
         var union=Union(reference.Id,tables);
         lock(gate) {cached[key]=union; order.Remove(key); order.Add(key); while(order.Count>MaxCached) {cached.Remove(order[0]); order.RemoveAt(0);}}
         return union;
+    }
+    /// <summary>The period files a report reference reads, in union order (the same order Get concatenates them).</summary>
+    List<string> ReportFiles(TableRef reference) {
+        DateTime? time=reference.AsOf==null?null:DateTime.Parse(reference.AsOf,CultureInfo.InvariantCulture);
+        var state=new Versions(root,reference.Id).Snapshot(); var files=new List<string>();
+        foreach(var (period,p) in state.Periods.OrderBy(x=>x.Key,StringComparer.Ordinal)) {var v=Versions.Select(p,reference.Truth,time,reference.Version); if(v!=null) files.Add($"reports/{reference.Id}/{period}/v{v.Version}.xvt");}
+        return files;
+    }
+    /// <summary>The single file of a table or version reference; null for a report (several period files).</summary>
+    string? SingleFile(TableRef reference) {
+        if(reference.Kind=="table") { var snapshot=catalog.Snapshot(); var entry=snapshot.Workspace.FirstOrDefault(x=>x.Info.Id==reference.Id); if(entry!=null) return entry.RelativePath; var info=snapshot.Tables.FirstOrDefault(x=>x.Kind=="table" && x.Id==reference.Id) ?? throw new UserError("The table was not found."); return $"tables/{info.Group}/{info.Id}.xvt"; }
+        if(reference.Kind=="version") {foreach(var report in catalog.Snapshot().ReportTypes) foreach(var (period,p) in new Versions(root,report).Snapshot().Periods) {var v=p.Versions.FirstOrDefault(x=>x.VersionId.ToString(CultureInfo.InvariantCulture)==reference.Id); if(v!=null) return $"reports/{report}/{period}/v{v.Version}.xvt";} throw new UserError("The version was not found.");}
+        if(reference.Kind!="report") throw new UserError("The table was not found.");
+        return null;
+    }
+    /// <summary>Only these rows (row numbers of Get's table, in this order) of these columns. Each period file reads its own rows.</summary>
+    public Table GetRows(TableRef reference,IReadOnlyCollection<string>? columns,int[] rows) {
+        string[]? want=columns==null?null:columns.Concat(new[]{"_v","_r"}).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var single=SingleFile(reference);
+        if(single!=null) return TableFile.Open(root,single).LoadRows(want,rows);
+        var files=ReportFiles(reference).Select(f=>TableFile.Open(root,f)).ToList();
+        var starts=new int[files.Count+1]; for(int i=0;i<files.Count;i++) starts[i+1]=checked(starts[i]+files[i].Rows);
+        var local=files.Select(_=>new List<int>()).ToArray(); var where=new (int File,int Index)[rows.Length];
+        for(int k=0;k<rows.Length;k++) {int f=Array.BinarySearch(starts,rows[k]); if(f<0) f=~f-1; while(f+1<starts.Length-1 && starts[f+1]==rows[k] && files[f].Rows==0) f++; if(f<0||f>=files.Count||rows[k]>=starts[^1]) throw new ArgumentOutOfRangeException(nameof(rows)); where[k]=(f,local[f].Count); local[f].Add(rows[k]-starts[f]);}
+        var parts=new List<Table>(); var partStart=new int[files.Count]; int at=0;
+        for(int f=0;f<files.Count;f++) {partStart[f]=at; parts.Add(files[f].LoadRows(want,local[f].ToArray())); at+=local[f].Count;}
+        var union=Union(reference.Id,parts);
+        var order=where.Select(w=>partStart[w.File]+w.Index).ToArray();
+        return new Table(union.Name,union.Columns.Select(c=>ExcelApp.Data.Query.Engine.Gather(c,order)).ToArray());
     }
     public static Table Union(string name,IReadOnlyList<Table> tables) {
         if(tables.Count==0) return new Table(name,Array.Empty<Column>());

@@ -34,8 +34,10 @@ takes minutes and several gigabytes. Later opens use the fast copy (0.1 s).
   Now the engine reads only the columns the question uses (filter, formulas, grouping, sorting, shown columns, join keys).
   The same question takes **1.5 s with 437 MB peak**. Report unions also merge text dictionaries instead of making one
   string per row. The provider now keeps 4 unions in memory instead of all of them (`TableProvider.MaxCached`).
-- Still loading everything: a question that shows every column of a wide report, such as opening a view with no column
-  list. The next step is lazy result paging, so a 300-column result loads only the rows and columns on screen.
+- A question that shows every column (`SELECT * ... LIMIT 10`) filters and sorts on the columns it needs, then reads
+  the 300 columns only for the rows it returns. Over MCP on 3M x 300, `describe_table` went from out of memory to 0.2 s.
+  Still large: a Data-mode view with no column list and no limit returns every row of every column. The next step is
+  result paging, so such a view loads only the rows on screen.
 
 ## How far from Excel 365
 **Has:** open, scroll, select, edit with Excel's typing rules, about 170 calculated functions, fill series, copy, cut and
@@ -62,7 +64,7 @@ Full parity with Excel 365 is years of work for a large team. The realistic goal
 much faster, plus the Data mode, which Excel does not have.
 
 ## Decisions only the owner (as IT manager) can make
-1. **AI reading the data.** Rule 0.1 says real data never leaves this laptop, and rule 0.10 says there is no AI model
+1. **AI reading the data. Decided on 2026-11-14: AI may see everything, cell values included.** ExcelApp gets read-only agent access: a SQL-like `--query` command and an MCP server (`--mcp`), see `docs\AI-ACCESS.md`. The choices it was made from: Rule 0.1 says real data never leaves this laptop, and rule 0.10 says there is no AI model
    in the build. Any cloud AI, including Claude, ChatGPT and Copilot, would send cell values off the laptop. The options:
    - (a) A local, read-only query command for the store (SQL-like, for example
      `ExcelApp.exe --query "select Region, sum(Sales) from sales group by Region"`). An agent on the laptop could call

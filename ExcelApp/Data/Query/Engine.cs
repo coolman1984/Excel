@@ -2,14 +2,19 @@ using System.Globalization;
 
 namespace ExcelApp.Data.Query;
 
-public sealed record QueryResult(Table Table);
+/// <summary>Total is the number of rows the question matched before LIMIT.</summary>
+public sealed record QueryResult(Table Table) { public int Total { get; init; } }
 
 public static class Engine
 {
     public static QueryResult Run(QuerySpec spec, ITableProvider provider, CancellationToken token)
     {
         var needed = Needed(spec);
-        Table table = provider.Get(spec.Source, needed);
+        // A question that shows every column (no column list, no grouping, no join) works on the columns it filters, calculates
+        // and sorts by, then reads the rest only for the rows it returns: SELECT * ... LIMIT 10 over 300 columns reads 10 rows of them.
+        bool late = needed == null && spec.Joins is not { Count: > 0 };
+        Table table = provider.Get(spec.Source, late ? WorkColumns(spec) : needed);
+        if (late && table.Columns.Count == 0) { late = false; table = provider.Get(spec.Source, null); }
         foreach (var join in spec.Joins ?? new()) table = Join.Run(table, provider.Get(join.Right, RightNeeded(needed, join)), join, token);
         var rows = Enumerable.Range(0, table.Rows).ToArray();
         if (spec.Where is { } where) { var predicate = Pred.Compile(where, table); rows = rows.Where(r => { token.ThrowIfCancellationRequested(); return predicate(r); }).ToArray(); }
@@ -74,10 +79,18 @@ public static class Engine
             else Array.Sort(rows, (a, b) => { foreach (var (c, desc) in sorts) { bool an = c.IsNull(a), bn = c.IsNull(b); if (an != bn) return an ? 1 : -1; if (an) continue; int cmp = c.Type == ColType.Text ? StringComparer.OrdinalIgnoreCase.Compare(c.Text(a), c.Text(b)) : c.Num(a).CompareTo(c.Num(b)); if (cmp != 0) return desc ? -cmp : cmp; } return a.CompareTo(b); });
         }
         if (spec.Limit is < 0) throw new ArgumentException("Limit cannot be negative.");
+        int total = rows.Length;
         if (spec.Limit is int limit && rows.Length > limit) rows = rows.Take(limit).ToArray();
+        if (late)
+        {
+            var fetched = provider.GetRows(spec.Source, null, rows);
+            var all = fetched.Columns.ToList();
+            foreach (var c in spec.Computed ?? new()) all.Add(Gather(table[c.Name]!, rows));
+            return new QueryResult(new Table(table.Name, all)) { Total = total };
+        }
         var selected = spec.Columns is { Count: > 0 } ? spec.Columns.Select(n => table[n] ?? throw new ArgumentException("Unknown projected column.")).ToList() : table.Columns.ToList();
         if (spec.GroupBy is not { Count: > 0 } && spec.Aggregates is not { Count: > 0 }) foreach (var c in table.Columns.Where(c => c.Name is "_v" or "_r")) if (!selected.Contains(c)) selected.Add(c);
-        return new QueryResult(new Table(table.Name, selected.Select(c => Gather(c, rows)).ToArray()));
+        return new QueryResult(new Table(table.Name, selected.Select(c => Gather(c, rows)).ToArray())) { Total = total };
     }
     /// <summary>The columns a question reads, or null when it shows every column. A store with 300 columns then loads only these.</summary>
     internal static HashSet<string>? Needed(QuerySpec spec)
@@ -104,6 +117,15 @@ public static class Engine
             else if (p.NameEquals("cols") && p.Value.ValueKind == System.Text.Json.JsonValueKind.Array) { foreach (var x in p.Value.EnumerateArray()) if (x.ValueKind == System.Text.Json.JsonValueKind.String) into.Add(x.GetString()!); }
             else PredColumns(p.Value, into);
         }
+    }
+    /// <summary>The columns a question that shows everything needs before its rows are known: filter, formulas and sort.</summary>
+    static HashSet<string> WorkColumns(QuerySpec spec)
+    {
+        var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_v", "_r" };
+        foreach (var o in spec.Sort ?? new()) s.Add(o.Col);
+        foreach (var c in spec.Computed ?? new()) foreach (var n in Expr.Columns(c.Expr)) s.Add(n);
+        if (spec.Where is { } w) PredColumns(w, s);
+        return s;
     }
     /// <summary>The right side of a join reads its keys and any used name, with the join's prefix (or "right.") taken off.</summary>
     static HashSet<string>? RightNeeded(HashSet<string>? needed, JoinSpec join)
@@ -147,7 +169,7 @@ public static class Engine
         public override bool Equals(object? obj) => Equals(obj as GroupKey);
         public override int GetHashCode() { var h = new HashCode(); foreach (var p in parts) h.Add(p); return h.ToHashCode(); }
     }
-    internal static Column Gather(Column c, int[] rows)
+    public static Column Gather(Column c, int[] rows)
     {
         if (c is TextColumn text) return new TextColumn(c.Name, rows.Select(r => text.Codes[r]).ToArray(), text.Dict);
         if (c is BoolColumn boolean) return new BoolColumn(c.Name, rows.Select(r => boolean.Values[r]).ToArray());
