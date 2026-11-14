@@ -124,6 +124,33 @@ export class MockHost {
         return () => set!.delete(handler);
     }
 
+    /** Inserts or deletes rows or columns of the current sheet (the browser preview; the real work is in the C# host). */
+    private restructure(args: any, rows: boolean, insert: boolean): any {
+        const s = this.sheets[args.sheet ?? this.current];
+        const at = rows ? args.row : args.col, n = Math.max(1, args.count ?? 1);
+        const size = rows ? s.rows : s.cols;
+        if (insert ? at < 0 || at > size : at < 0 || at + n > size) throw new Error("Those cells are outside the sheet.");
+        if (!insert && n >= size) throw new Error(`A sheet keeps at least one ${rows ? "row" : "column"}.`);
+        const blank = (): CellData => ({ text: "", kind: 0, align: 0 });
+        if (rows) {
+            if (insert) s.base.splice(at, 0, ...Array.from({ length: n }, () => Array.from({ length: s.cols }, blank)));
+            else s.base.splice(at, n);
+            s.rows = s.base.length;
+        } else {
+            for (const row of s.base) { if (insert) row.splice(at, 0, ...Array.from({ length: n }, blank)); else row.splice(at, n); }
+            s.cols += insert ? n : -n;
+        }
+        const move = (v: number) => (insert ? (v >= at ? v + n : v) : v < at ? v : v >= at + n ? v - n : -1);
+        const shift = <T,>(m: Map<string, T>) => {
+            const out = new Map<string, T>();
+            for (const [k, v] of m) { const [r, c] = k.split(",").map(Number); const r2 = rows ? move(r) : r, c2 = rows ? c : move(c); if (r2 >= 0 && c2 >= 0) out.set(this.keyFor(r2, c2), v); }
+            return out;
+        };
+        this.valueEdits = shift(this.valueEdits); this.styleEdits = shift(this.styleEdits);
+        this.filters.clear(); this.sortKeys = []; this.viewCache = null; this.undoStack = []; this.redoStack = []; this.dirty = true;
+        return { sheet: args.sheet ?? this.current, structure: true, rows: s.rows, cols: s.cols, viewRows: s.rows, dirty: true, canUndo: false, canRedo: false };
+    }
+
     // A pretend Claude Code for the browser preview: it reads two cells, writes one and answers.
     private agentTimers: ReturnType<typeof setTimeout>[] = [];
     private agentStart(args: any): any {
@@ -425,6 +452,10 @@ export class MockHost {
             case "openExternal":
             case "log":
                 return { ok: true };
+            case "insertRows": return this.restructure(args, true, true);
+            case "deleteRows": return this.restructure(args, true, false);
+            case "insertCols": return this.restructure(args, false, true);
+            case "deleteCols": return this.restructure(args, false, false);
             case "agent.status":
                 return { claude: true, codex: false, running: this.agentTimers.length > 0 ? "claude" : null };
             case "agent.start":

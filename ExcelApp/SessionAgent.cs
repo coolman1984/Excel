@@ -34,7 +34,7 @@ public sealed partial class Session
     {
         gate.Wait();
         var c = Need(); int sheet = AgentSheet(c, a); var d = c.Sheets[sheet];
-        var (r1, c1, r2, c2) = A1.Parse(Arg.Str(a, "range") ?? throw new UserError("Say which range to read, such as A1:D20."), d.FirstRow + d.Rows - 1, d.FirstCol + d.Cols - 1);
+        var (r1, c1, r2, c2) = A1.Parse(Arg.Str(a, "range") ?? throw new UserError("Say which range to read, such as A1:D20."), d.FirstRow + RowsOf(sheet) - 1, d.FirstCol + ColsOf(sheet) - 1);
         long count = (long)(r2 - r1 + 1) * (c2 - c1 + 1);
         if (count > AgentMaxCells) throw new UserError($"That range has {count:N0} cells; read at most {AgentMaxCells:N0} at a time (for example A1:T1000). For questions over all rows, use the data store's SQL.");
         var values = new string[r2 - r1 + 1][]; string?[][]? formulas = null;
@@ -47,7 +47,7 @@ public sealed partial class Session
                 for (int k = c1; k <= c2; k++)
                 {
                     int col = k - d.FirstCol;
-                    if (real < 0 || real >= d.Rows || col < 0 || col >= d.Cols) { row[k - c1] = ""; continue; }
+                    if (real < 0 || real >= RowsOf(sheet) || col < 0 || col >= ColsOf(sheet)) { row[k - c1] = ""; continue; }
                     row[k - c1] = cells!.Render(sheet, rd, real, col).Text;
                     string raw = cells.Raw(sheet, rd, real, col);
                     if (raw.StartsWith('='))
@@ -61,7 +61,7 @@ public sealed partial class Session
         return new
         {
             sheet = d.Name, range = A1.Format(r1, c1, r2, c2), values, formulas,
-            used = d.Rows == 0 || d.Cols == 0 ? "" : A1.Format(d.FirstRow, d.FirstCol, d.FirstRow + d.Rows - 1, d.FirstCol + d.Cols - 1),
+            used = RowsOf(sheet) == 0 || ColsOf(sheet) == 0 ? "" : A1.Format(d.FirstRow, d.FirstCol, d.FirstRow + RowsOf(sheet) - 1, d.FirstCol + ColsOf(sheet) - 1),
         };
     }
 
@@ -71,7 +71,7 @@ public sealed partial class Session
         var (r0, c0, _, _) = A1.Parse(Arg.Str(a, "start") ?? throw new UserError("Say where to start writing, such as B2."));
         if (!a.TryGetProperty("values", out var rows) || rows.ValueKind != JsonValueKind.Array) throw new UserError("Give the values as rows, such as [[\"Name\", 5], [\"Total\", \"=SUM(B1:B1)\"]].");
         var list = new List<(int, int, CellEdit?)>(); long count = 0;
-        string used = d.Rows == 0 || d.Cols == 0 ? "(empty)" : A1.Format(d.FirstRow, d.FirstCol, d.FirstRow + d.Rows - 1, d.FirstCol + d.Cols - 1);
+        string used = RowsOf(sheet) == 0 || ColsOf(sheet) == 0 ? "(empty)" : A1.Format(d.FirstRow, d.FirstCol, d.FirstRow + RowsOf(sheet) - 1, d.FirstCol + ColsOf(sheet) - 1);
         int i = 0;
         foreach (var row in rows.EnumerateArray())
         {
@@ -81,7 +81,7 @@ public sealed partial class Session
             {
                 if (++count > AgentMaxCells) throw new UserError($"Write at most {AgentMaxCells:N0} cells at a time.");
                 int excelRow = r0 + i, excelCol = c0 + k, real = excelRow - d.FirstRow, col = excelCol - d.FirstCol;
-                if (real < 0 || real >= d.Rows || col < 0 || col >= d.Cols)
+                if (real < 0 || real >= RowsOf(sheet) || col < 0 || col >= ColsOf(sheet))
                     throw new UserError($"{A1.Format(excelRow, excelCol, excelRow, excelCol)} is outside the sheet's data ({used}); this editor writes inside it only.");
                 CellEdit edit = v.ValueKind switch
                 {

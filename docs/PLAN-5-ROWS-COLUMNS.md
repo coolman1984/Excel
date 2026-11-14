@@ -1,4 +1,10 @@
-# Plan 5: insert and delete rows and columns (the owner's next feature, 2026-11-14)
+# Plan 5: insert and delete rows and columns (the owner's next feature, 2026-11-14) — built 2026-11-14
+
+**Status:** built as designed below, with one simplification: inserting or deleting needs a sheet without a filter or
+sort (the editor says so), and the filter and sort are cleared after an insert, a delete, or its undo. Offline tests:
+`structure` (Excel's reference rules, the edit set, undo and redo, the journal) and `layout` (cells, formulas, filters
+and find over a made-up fast copy). Live tests for the laptop: host "insert and delete", and "save structure" (Excel replays the
+steps and moves its own formulas).
 
 Order chosen by the owner: insert and delete rows and columns, then charts and pivot tables, then the dashboard designer.
 

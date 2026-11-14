@@ -99,11 +99,11 @@ export function App(): React.ReactElement {
 
     React.useEffect(() => {
         const offs: (() => void)[] = [];
-        // An AI agent changed the workbook through ExcelApp's MCP tools: read the sheet, the visible cells and the saved state again.
+        // An AI agent changed the workbook through ExcelApp's MCP tools: read the sheets (sizes may change), the cells and the saved state again.
         offs.push(onEvent("agentChanged", () => {
+            call<any>("workbook").then((w) => { if (w?.sheets) setWorkbook(w); setDirty(!!w?.dirty); }).catch(() => {});
             void loadSheet(sheetRef.current).catch(() => {});
             gridRef.current?.refresh();
-            call<any>("workbook").then((w) => setDirty(!!w?.dirty)).catch(() => {});
         }));
         offs.push(
             onEvent("opening", (e) => {
@@ -381,21 +381,49 @@ export function App(): React.ReactElement {
         setDirty(true);
     }, [sheet, sheetIndex, activeCell, refreshView]);
 
+    /** After rows or columns were inserted or deleted (or that was undone): the sheet's size and widths change, so read it all again. */
+    const reloadStructure = React.useCallback(async (index: number) => {
+        const wb: any = await call("workbook");
+        if (wb?.sheets) setWorkbook(wb);
+        setDirty(!!wb?.dirty);
+        await loadSheet(index);
+        gridRef.current?.refresh();
+    }, [loadSheet]);
+
     const doUndo = React.useCallback(async () => {
         if (!sheet) return;
         const r: any = await call("undo", { sheet: sheetIndex });
         setDirty(!!r.dirty);
         if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
+        if (r.structure) await reloadStructure(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView, selectSheet]);
+    }, [sheet, sheetIndex, refreshView, selectSheet, reloadStructure]);
+
+    const doStructure = React.useCallback(async (kind: "insertRows" | "insertCols" | "deleteRows" | "deleteCols") => {
+        if (!sheet) return;
+        const rows = kind.endsWith("Rows");
+        const args = rows
+            ? { sheet: sheetIndex, row: selection.r1, count: selection.r2 - selection.r1 + 1 }
+            : { sheet: sheetIndex, col: selection.c1, count: selection.c2 - selection.c1 + 1 };
+        try {
+            await call(kind, args);
+            await reloadStructure(sheetIndex);
+            const n = args.count, what = rows ? (n === 1 ? "row" : "rows") : (n === 1 ? "column" : "columns");
+            setStatus(`${kind.startsWith("insert") ? "Inserted" : "Deleted"} ${n.toLocaleString()} ${what}`);
+        } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            setDialog({ name: "Message", props: { title: "Microsoft Excel", text: msg, onClose: () => setDialog(null) } });
+        }
+    }, [sheet, sheetIndex, selection, reloadStructure]);
 
     const doRedo = React.useCallback(async () => {
         if (!sheet) return;
         const r: any = await call("redo", { sheet: sheetIndex });
         setDirty(!!r.dirty);
         if (r.sheet >= 0 && r.sheet !== sheetIndex) selectSheet(r.sheet);
+        if (r.structure) await reloadStructure(r.sheet);
         refreshView();
-    }, [sheet, sheetIndex, refreshView, selectSheet]);
+    }, [sheet, sheetIndex, refreshView, selectSheet, reloadStructure]);
 
     const toggleBold = React.useCallback(() => {
         const v = !fmtFlags.bold;
@@ -627,6 +655,13 @@ export function App(): React.ReactElement {
                 case "insertTime": if (sheet) void commitCell(activeCell.row, activeCell.col, timeInput(new Date())); return true;
                 case "autoSum": onAutoSum(); return true;
                 case "formatCells": onFormatCells(); return true;
+                case "insertCells":
+                case "deleteCells": {
+                    // Excel: whole columns selected -> columns; otherwise rows
+                    const wholeCols = sheet != null && selection.r1 === 0 && selection.r2 >= viewRows - 1 && viewRows > 1;
+                    void doStructure(cmd === "insertCells" ? (wholeCols ? "insertCols" : "insertRows") : (wholeCols ? "deleteCols" : "deleteRows"));
+                    return true;
+                }
                 case "selectColumn": if (sheet) gridRef.current?.setSelection(0, selection.c1, Math.max(0, viewRows - 1), selection.c2); return true;
                 case "selectRow": if (sheet) gridRef.current?.setSelection(selection.r1, 0, selection.r2, Math.max(0, sheet.cols - 1)); return true;
                 case "edgeUp":
@@ -643,7 +678,7 @@ export function App(): React.ReactElement {
                     return false;
             }
         },
-        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge, selection, doFill, commitCell, onAutoSum, onFormatCells, onNumberFormat]
+        [doSave, openBrowse, dlgFind, dlgGoTo, doCopy, doCut, doPaste, doUndo, doRedo, toggleBold, toggleItalic, toggleUnderline, clearRanges, rangesNow, sheet, openFilterMenu, activeCell, viewRows, selectSheet, sheetIndex, workbook, zoom, setZoomPct, doEdge, selection, doFill, commitCell, onAutoSum, onFormatCells, onNumberFormat, doStructure]
     );
 
     const dispatchRef = React.useRef(dispatch);
@@ -747,6 +782,7 @@ export function App(): React.ReactElement {
                 onDecrease={onDecrease}
                 onAutoSum={onAutoSum}
                 onFormatCells={onFormatCells}
+                onStructure={(k) => void doStructure(k)}
                 onClearAll={onClearAll}
                 onClearContents={onClearContents}
                 onClearFormats={onClearFormats}

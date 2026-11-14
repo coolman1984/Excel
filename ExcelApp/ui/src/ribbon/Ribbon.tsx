@@ -36,6 +36,7 @@ export interface RibbonProps {
 
     onAutoSum: () => void;
     onFormatCells: () => void;
+    onStructure: (kind: "insertRows" | "insertCols" | "deleteRows" | "deleteCols") => void;
     onClearAll: () => void;
     onClearContents: () => void;
     onClearFormats: () => void;
@@ -299,8 +300,22 @@ function HomeTab(p: RibbonProps): React.ReactElement {
             </Group>
 
             <Group label="Cells">
-                <RButton label="Insert" disabled title="Insert cells - coming later" onClick={() => {}} />
-                <RButton label="Delete" disabled title="Delete cells - coming later" onClick={() => {}} />
+                <Menu label="Insert" testid="menu-insert">
+                    {(close) => (
+                        <div className="menuList">
+                            <button type="button" className="menuItem" disabled={d} onClick={() => { p.onStructure("insertRows"); close(); }}>Insert Sheet Rows</button>
+                            <button type="button" className="menuItem" disabled={d} onClick={() => { p.onStructure("insertCols"); close(); }}>Insert Sheet Columns</button>
+                        </div>
+                    )}
+                </Menu>
+                <Menu label="Delete" testid="menu-delete">
+                    {(close) => (
+                        <div className="menuList">
+                            <button type="button" className="menuItem" disabled={d} onClick={() => { p.onStructure("deleteRows"); close(); }}>Delete Sheet Rows</button>
+                            <button type="button" className="menuItem" disabled={d} onClick={() => { p.onStructure("deleteCols"); close(); }}>Delete Sheet Columns</button>
+                        </div>
+                    )}
+                </Menu>
                 <RButton label="Format" disabled={d} title="Format Cells (Ctrl+1)" onClick={p.onFormatCells} testid="btn-format-cells" />
             </Group>
 

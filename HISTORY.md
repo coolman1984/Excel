@@ -1,5 +1,9 @@
 # History
 
+## 2026-11-14 (continued)
+
+- **Insert and delete rows and columns:** the ribbon's Insert and Delete menus, Ctrl++ and Ctrl+-, and the agent's run_command (insertRows, deleteRows, insertCols, deleteCols). Each logical row or column maps to the fast copy's (a new one is blank), formulas move their references as Excel does (ranges grow and shrink, deleted cells become #REF!), one undo step each, the unsaved-edits journal keeps them, and Save replays them in Excel before writing the cells. Offline: two new suites (structure, layout); live checks are written for the laptop.
+
 ## 2026-11-14
 
 - **The agent works inside ExcelApp:** the ✦ Agent panel runs Claude Code CLI or Codex CLI, whichever the owner is signed in to (no API key in ExcelApp). Through ExcelApp's MCP server the agent reads and writes the open workbook by Excel address, runs any window command (styles, filters, sorting, fill, save) and queries the data store. The window opens a named pipe for this that only the owner's account can reach, and it redraws when the agent changes something. The event formats come from the real CLIs, and the real Claude Code CLI answered a question about made-up 3M-row data end to end.

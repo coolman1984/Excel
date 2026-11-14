@@ -48,10 +48,8 @@ public sealed class Cells
         if (code != null) s = FormatNumber(code, n, style, true);
         else
         {
-            var chunk = ColumnChunk.Build(1, new[] { CellKind.Number }, new[] { n }, null);
-            var cv = rd.Show(chunk, 0, row, col);
-            s = new Shown3(cv.Text, CellKind.Number, n, cv.Color == null ? null : (cv.Color.Value.R << 16) | (cv.Color.Value.G << 8) | cv.Color.Value.B, cv.Warn, style, true);
-            if (cv.Warn && string.Equals(FileFormat(sheet, row, col), "General", StringComparison.OrdinalIgnoreCase))
+            s = ShowNumber(sheet, rd, row, col, n, style);
+            if (s.Warn && string.Equals(FileFormat(sheet, row, col), "General", StringComparison.OrdinalIgnoreCase))
                 s = new Shown3(n.ToString("G15", CultureInfo.CurrentCulture), CellKind.Number, n, null, false, style, true);
         }
         return s with { Formula = f };
@@ -73,16 +71,56 @@ public sealed class Cells
 
     public bool HasEdits { get { lock (editLock) return edits.All.Count > 0; } }
 
+    // ---- inserted and deleted rows and columns: positions here are logical; the fast copy is read through the layout
+    /// <summary>The fast-copy row and column of a logical cell; -1 when the row or column was inserted (blank).</summary>
+    public (int Row, int Col) Phys(int sheet, int row, int col) { lock (editLock) return (edits.PhysRow(sheet, row), edits.PhysCol(sheet, col)); }
+    public int RowCount(int sheet) { lock (editLock) return edits.RowCount(sheet, cache.Sheets[sheet].Rows); }
+    public int ColCount(int sheet) { lock (editLock) return edits.ColCount(sheet, cache.Sheets[sheet].Cols); }
+    public bool HasLayout(int sheet) { lock (editLock) return edits.HasLayout(sheet); }
+    /// <summary>The logical cell showing a fast-copy cell, or (-1, -1) when its row or column was deleted.</summary>
+    public (int Row, int Col) Logical(int sheet, int physRow, int physCol)
+    { lock (editLock) { int r = edits.LogicalRow(sheet, physRow), c = edits.LogicalCol(sheet, physCol); return r < 0 || c < 0 ? (-1, -1) : (r, c); } }
+
+    /// <summary>The file's own value of a logical cell (ignoring edits): kind, number, and text when it is text.</summary>
+    public (byte Kind, double Num, string? Text) FileValue(int sheet, SheetReader rd, int row, int col)
+    {
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return (CellKind.Empty, 0, null);
+        var c = rd.Column(pr, pc); int i = pr % rd.Sheet.BlockRows; byte k = c.KindAt(i);
+        return k switch
+        {
+            CellKind.Number or CellKind.Bool or CellKind.Error => (k, c.Nums[i], null),
+            CellKind.Text => c.TextBytes(i).Length == 0 ? (CellKind.Empty, 0, "") : (k, 0, c.TextAt(i)),
+            _ => (CellKind.Empty, 0, null),
+        };
+    }
+
+    /// <summary>A number shown with the cell's own number format from the file (General in an inserted row or column).</summary>
+    Shown3 ShowNumber(int sheet, SheetReader rd, int row, int col, double n, StyleDelta? style)
+    {
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return FormatNumber("General", n, style, true);
+        var chunk = ColumnChunk.Build(1, new[] { CellKind.Number }, new[] { n }, null);
+        var v = rd.Show(chunk, 0, pr, pc);
+        return new Shown3(v.Text, CellKind.Number, n, v.Color == null ? null : (v.Color.Value.R << 16) | (v.Color.Value.G << 8) | v.Color.Value.B, v.Warn, style, true);
+    }
+
     public bool TryEdit(int sheet, int row, int col, out CellEdit edit)
     { lock (editLock) return edits.TryGet(sheet, row, col, out edit!); }
 
     public StyleDelta? FileStyle(int sheet, int row, int col)
-    { var sc = sidecar(); return sc == null ? null : StyleStore.StyleAt(sc, sheet, row, col); }
+    {
+        var sc = sidecar(); if (sc == null) return null;
+        var (pr, pc) = Phys(sheet, row, col);
+        return pr < 0 || pc < 0 ? null : StyleStore.StyleAt(sc, sheet, pr, pc);
+    }
 
     /// <summary>Format code of the cell in the file ("General" when none).</summary>
     public string FileFormat(int sheet, int row, int col)
     {
-        var d = cache.Sheets[sheet]; int id = d.FormatAt(row, col);
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return "General";
+        var d = cache.Sheets[sheet]; int id = d.FormatAt(pr, pc);
         return id >= 0 && id < cache.Formats.Count ? cache.Formats[id].Code : "General";
     }
 
@@ -140,16 +178,16 @@ public sealed class Cells
                     {
                         string? code = edit.Style?.NumberFormat;
                         if (code != null) return FormatNumber(code, edit.Num, style, true);
-                        var chunk = ColumnChunk.Build(1, new[] { CellKind.Number }, new[] { edit.Num }, null);
-                        var v = rd.Show(chunk, 0, row, col);
-                        return new Shown3(v.Text, CellKind.Number, edit.Num, v.Color == null ? null : (v.Color.Value.R << 16) | (v.Color.Value.G << 8) | v.Color.Value.B, v.Warn, style, true);
+                        return ShowNumber(sheet, rd, row, col, edit.Num, style);
                     }
             }
         }
-        var c = rd.Column(row, col); int i = row % rd.Sheet.BlockRows; byte k = c.KindAt(i);
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return new Shown3("", CellKind.Empty, 0, null, false, style, has);   // an inserted row or column
+        var c = rd.Column(pr, pc); int i = pr % rd.Sheet.BlockRows; byte k = c.KindAt(i);
         double num = k is CellKind.Number or CellKind.Bool or CellKind.Error ? c.Nums[i] : 0;
         if (k == CellKind.Number && edit?.Style?.NumberFormat is string nf) return FormatNumber(nf, num, style, has);
-        var cv = rd.Show(c, i, row, col);
+        var cv = rd.Show(c, i, pr, pc);
         if (k == CellKind.Text && cv.Text.Length == 0) k = CellKind.Empty;
         int? color = cv.Color == null ? null : (cv.Color.Value.R << 16) | (cv.Color.Value.G << 8) | cv.Color.Value.B;
         return new Shown3(cv.Text, k, num, color, cv.Warn, style, has);
@@ -176,7 +214,9 @@ public sealed class Cells
                 EditKind.Bool => (e.Bool ?? e.Num != 0) ? "TRUE" : "FALSE",
                 _ => e.Num.ToString("R", CultureInfo.CurrentCulture),
             };
-        var c = rd.Column(row, col); int i = row % rd.Sheet.BlockRows;
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return "";
+        var c = rd.Column(pr, pc); int i = pr % rd.Sheet.BlockRows;
         return c.KindAt(i) switch
         {
             CellKind.Number => c.Nums[i].ToString("R", CultureInfo.CurrentCulture),
@@ -191,7 +231,9 @@ public sealed class Cells
     public CellEdit? ValueEdit(int sheet, SheetReader rd, int row, int col)
     {
         if (TryEdit(sheet, row, col, out var e) && !EditMarks.IsStyleOnly(e)) return e;
-        var c = rd.Column(row, col); int i = row % rd.Sheet.BlockRows;
+        var (pr, pc) = Phys(sheet, row, col);
+        if (pr < 0 || pc < 0) return new CellEdit(EditKind.Clear);
+        var c = rd.Column(pr, pc); int i = pr % rd.Sheet.BlockRows;
         return c.KindAt(i) switch
         {
             CellKind.Number => new CellEdit(EditKind.Number, Num: c.Nums[i]),
@@ -225,7 +267,7 @@ public sealed class SheetSource : ICellSource, IDisposable
         lock (gate) { old = readers; readers = NewReaders(); }
         foreach (var r in old.Values) r.Dispose(); old.Dispose();
     }
-    public int Rows => d.Rows; public int Cols => d.Cols;
+    public int Rows => cells.RowCount(sheet); public int Cols => cells.ColCount(sheet);
 
     public void Read(int col, int fromRow, int count, string[] text, byte[] kind, double[] num)
         => ReadCore(col, fromRow, count, text, kind, num, false);
@@ -237,6 +279,21 @@ public sealed class SheetSource : ICellSource, IDisposable
     {
         ThreadLocal<SheetReader> tl; lock (gate) tl = readers;
         var rd = tl.Value!; int done = 0;
+        if (cells.HasLayout(sheet))
+        {
+            // Rows or columns were inserted or deleted: each logical row reads its own fast-copy row (blank when inserted).
+            for (int k = 0; k < count; k++)
+            {
+                int row = fromRow + k; var (pr, pc) = cells.Phys(sheet, row, col);
+                if (pr < 0 || pc < 0) { text[k] = ""; kind[k] = 0; num[k] = 0; continue; }
+                var c = rd.Column(pr, pc); int i = pr % d.BlockRows; byte kd = c.KindAt(i);
+                if (kd == CellKind.Empty) { text[k] = ""; kind[k] = 0; num[k] = 0; continue; }
+                text[k] = raw ? (kd == CellKind.Text ? c.TextAt(i) : "") : rd.Show(c, i, pr, pc).Text;
+                kind[k] = kd; num[k] = kd == CellKind.Text ? 0 : c.Nums[i];
+                if (kd == CellKind.Text && text[k].Length == 0) kind[k] = 0;
+            }
+            done = count;
+        }
         while (done < count)
         {
             int row = fromRow + done, ci = row / d.BlockRows, i0 = row % d.BlockRows;

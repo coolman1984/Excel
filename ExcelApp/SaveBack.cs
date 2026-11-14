@@ -20,7 +20,11 @@ public static class SaveBack
         public List<Edit> Edits { get; set; } = new();
         public List<Width> ColWidths { get; set; } = new();
         public List<Freeze> Freeze { get; set; } = new();
+        /// <summary>Inserted and deleted rows and columns, replayed in this order before any cell is written.</summary>
+        public List<Structure> Structure { get; set; } = new();
     }
+    /// <summary>At: the first Excel row or column number (1-based) at the time of the step.</summary>
+    public sealed class Structure { public string Sheet { get; set; } = ""; public bool Rows { get; set; } public int At { get; set; } public int Count { get; set; } public bool Insert { get; set; } }
     public sealed class Edit
     {
         public string Sheet { get; set; } = "";
@@ -74,10 +78,21 @@ public static class SaveBack
             Line("OPENED"); Check();
             if ((bool)wb.ReadOnly && job.SameFile) throw new SaveStop(4, "readonly");
             // Check every affected sheet before applying any changes.
-            var names = job.Edits.Select(e => e.Sheet).Concat(job.ColWidths.Select(e => e.Sheet)).Concat(job.Freeze.Select(e => e.Sheet)).Distinct().ToArray();
+            var names = job.Edits.Select(e => e.Sheet).Concat(job.ColWidths.Select(e => e.Sheet)).Concat(job.Freeze.Select(e => e.Sheet)).Concat(job.Structure.Select(e => e.Sheet)).Distinct().ToArray();
             foreach (string name in names) { Check(); dynamic ws = wb.Worksheets[name]; try { if ((bool)ws.ProtectContents) throw new SaveStop(6, "protected"); } finally { Release(ws); } }
-            int total = job.Edits.Count + job.ColWidths.Count + job.Freeze.Count, done = 0, last = -2;
+            int total = job.Structure.Count + job.Edits.Count + job.ColWidths.Count + job.Freeze.Count, done = 0, last = -2;
             void Progress(int n) { done += n; int pct = total == 0 ? 100 : done * 100 / total; if (pct >= last + 2 || pct == 100) { Line("WRITING " + pct); last = pct; } }
+            // Inserts and deletes first, in the order they were made: Excel then moves its own formulas, names and formats,
+            // and the cells below are written at the addresses the editor showed.
+            foreach (var st in job.Structure)
+            {
+                Check(); dynamic ws = wb.Worksheets[st.Sheet];
+                string addr = st.Rows ? $"{st.At}:{st.At + st.Count - 1}" : $"{CacheBuilder.Letters(st.At)}:{CacheBuilder.Letters(st.At + st.Count - 1)}";
+                dynamic range = ws.Range[addr];
+                try { if (st.Insert) range.Insert(); else range.Delete(); }
+                finally { Release(range); Release(ws); }
+                Progress(1);
+            }
             foreach (var group in job.Edits.GroupBy(e => e.Sheet))
             {
                 dynamic ws = wb.Worksheets[group.Key];
@@ -152,6 +167,7 @@ public static class SaveBack
         if (j.Edits.Any(e => e.Row < 1 || e.Row > 1048576 || e.Col < 1 || e.Col > 16384 || !Enum.IsDefined(e.Kind) || e.Kind == EditKind.Number && !double.IsFinite(e.Num))) throw new InvalidDataException();
         if (j.ColWidths.Any(e => e.Col < 1 || e.Col > 16384 || !double.IsFinite(e.Px) || e.Px < 5 || e.Px > 1790)) throw new InvalidDataException();
         if (j.Freeze.Any(e => e.Rows < 0 || e.Rows >= 1048576 || e.Cols < 0 || e.Cols >= 16384)) throw new InvalidDataException();
+        if (j.Structure.Any(e => e.Count < 1 || e.At < 1 || e.At + e.Count - 1 > (e.Rows ? 1048576 : 16384) || string.IsNullOrEmpty(e.Sheet))) throw new InvalidDataException();
     }
     static object Value(Edit e) => e.Kind switch {
         EditKind.Number => e.Num, EditKind.Bool => e.Bool ?? e.Num != 0,

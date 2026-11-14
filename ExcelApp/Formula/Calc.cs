@@ -36,15 +36,17 @@ public sealed class Calc : IFormulaGrid, IDisposable
 
     public (int Rows, int Cols) Extent(int sheet)
     {
-        var d = cache.Sheets[sheet];
-        return (d.FirstRow - 1 + d.Rows, d.FirstCol - 1 + d.Cols);
+        var d = cache.Sheets[sheet]; int rows, cols;
+        lock (editLock) { rows = edits.RowCount(sheet, d.Rows); cols = edits.ColCount(sheet, d.Cols); }
+        return (d.FirstRow - 1 + rows, d.FirstCol - 1 + cols);
     }
 
     public FValue Get(int sheet, int row, int col)
     {
         if (sheet < 0 || sheet >= cache.Sheets.Count) return FValue.Error("#REF!");
-        var d = cache.Sheets[sheet]; int r = row + 1 - d.FirstRow, c = col + 1 - d.FirstCol;
-        if (r < 0 || c < 0 || r >= d.Rows || c >= d.Cols) return FValue.Blank;
+        var d = cache.Sheets[sheet]; int r = row + 1 - d.FirstRow, c = col + 1 - d.FirstCol; int rows, cols;
+        lock (editLock) { rows = edits.RowCount(sheet, d.Rows); cols = edits.ColCount(sheet, d.Cols); }
+        if (r < 0 || c < 0 || r >= rows || c >= cols) return FValue.Blank;
         return Value(sheet, r, c);
     }
 
@@ -61,8 +63,10 @@ public sealed class Calc : IFormulaGrid, IDisposable
                 EditKind.Bool => FValue.Bool(e.Bool ?? e.Num != 0),
                 _ => Compute(sheet, r, c, e.Formula ?? ""),
             };
+        int pr, pc; lock (editLock) { pr = edits.PhysRow(sheet, r); pc = edits.PhysCol(sheet, c); }
+        if (pr < 0 || pc < 0) return FValue.Blank;   // an inserted row or column
         if (!readers.TryGetValue(sheet, out var rd)) readers[sheet] = rd = new SheetReader(cache, cache.Sheets[sheet]);
-        var col = rd.Column(r, c); int i = r % rd.Sheet.BlockRows;
+        var col = rd.Column(pr, pc); int i = pr % rd.Sheet.BlockRows;
         return col.KindAt(i) switch
         {
             CellKind.Number => FValue.Num(col.Nums[i]),
@@ -230,4 +234,112 @@ public static class FormulaShift
     }
 
     static int Letters(string s) { int n = 0; foreach (char c in s.ToUpperInvariant()) n = n * 26 + c - 'A' + 1; return n; }
+
+    static readonly Regex RowRef = new(@"^(\$?)(\d{1,7})$", RegexOptions.CultureInvariant);
+
+    /// <summary>Moves a formula's references as Excel does when rows (or columns) are inserted or deleted on a sheet.
+    /// <paramref name="at"/> is the first Excel row or column number affected (1-based). References at or after it move by
+    /// <paramref name="count"/>; a range that spans it grows on insert and shrinks on delete; a reference wholly inside
+    /// deleted rows becomes #REF!. <paramref name="unqualifiedIsTarget"/>: the formula sits on the changed sheet, so
+    /// references without a sheet name point at it. Absolute ($) references move too, as in Excel.</summary>
+    public static string Structural(string formula, bool unqualifiedIsTarget, string targetSheet, bool rows, int at, int count, bool insert)
+    {
+        if (count <= 0 || string.IsNullOrEmpty(formula)) return formula;
+        int last = at + count - 1;
+        int Move(int v) => insert ? (v >= at ? v + count : v) : (v < at ? v : v > last ? v - count : -1);
+        (int, int)? Span(int a, int b)
+        {
+            if (insert) return a >= at ? (a + count, b + count) : b >= at ? (a, b + count) : (a, b);
+            if (a >= at && b <= last) return null;
+            int na = a < at ? a : a > last ? a - count : at, nb = b < at ? b : b > last ? b - count : at - 1;
+            return nb < na ? null : (na, nb);
+        }
+        var sb = new System.Text.StringBuilder(formula.Length + 8); int i = 0;
+        while (i < formula.Length)
+        {
+            char ch = formula[i];
+            if (ch == '"')
+            {
+                int start = i++; while (i < formula.Length) { if (formula[i] == '"') { if (i + 1 < formula.Length && formula[i + 1] == '"') { i += 2; continue; } i++; break; } i++; }
+                sb.Append(formula, start, i - start); continue;
+            }
+            // an optional sheet name: 'My sheet'! or Sheet1!
+            string? sheet = null; int refStart = i;
+            if (ch == '\'')
+            {
+                int j = i + 1; var name = new System.Text.StringBuilder();
+                while (j < formula.Length) { if (formula[j] == '\'') { if (j + 1 < formula.Length && formula[j + 1] == '\'') { name.Append('\''); j += 2; continue; } j++; break; } name.Append(formula[j++]); }
+                if (j < formula.Length && formula[j] == '!') { sheet = name.ToString(); i = j + 1; }
+                else { sb.Append(formula, i, j - i); i = j; continue; }
+            }
+            else if (char.IsLetter(ch) || ch == '_')
+            {
+                int j = i; while (j < formula.Length && (char.IsLetterOrDigit(formula[j]) || formula[j] is '_' or '.')) j++;
+                if (j < formula.Length && formula[j] == '!') { sheet = formula[i..j]; i = j + 1; }
+            }
+            // the reference itself: A1, $A$1, A1:B2, A:C, 3:5
+            int r0 = i; while (i < formula.Length && (char.IsLetterOrDigit(formula[i]) || formula[i] is '$' or '_' or '.')) i++;
+            string first = formula[r0..i];
+            if (first.Length == 0) { if (sheet != null) sb.Append(formula, refStart, i - refStart); else { sb.Append(ch); i++; } continue; }
+            int k = i; while (k < formula.Length && formula[k] == ' ') k++;
+            if (k < formula.Length && formula[k] == '(') { sb.Append(formula, refStart, i - refStart); continue; }   // a function name
+            string? second = null; int end = i;
+            if (i < formula.Length && formula[i] == ':')
+            {
+                int j = i + 1; while (j < formula.Length && (char.IsLetterOrDigit(formula[j]) || formula[j] == '$')) j++;
+                if (j > i + 1) { second = formula[(i + 1)..j]; end = j; }
+            }
+            char before = refStart > 0 ? formula[refStart - 1] : '\0';
+            bool inName = char.IsLetterOrDigit(before) || before is '_' or '.';
+            bool target = sheet == null ? unqualifiedIsTarget : string.Equals(sheet, targetSheet, StringComparison.OrdinalIgnoreCase);
+            string prefix = formula[refStart..r0];
+            string? moved = inName || !target ? null : MoveRef(first, second, rows, Move, Span);
+            if (moved == null) { sb.Append(formula, refStart, end - refStart); i = end; continue; }
+            sb.Append(prefix).Append(moved); i = end;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>The moved reference text, "#REF!" when it was deleted, or null when the text is not a reference.</summary>
+    static string? MoveRef(string a, string? b, bool rows, Func<int, int> move, Func<int, int, (int, int)?> span)
+    {
+        var ca = CellRef.Match(a);
+        if (b == null)
+        {
+            if (!ca.Success || a.Equals("TRUE", StringComparison.OrdinalIgnoreCase)) return null;
+            int col = Letters(ca.Groups[2].Value), row = int.Parse(ca.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
+            int v = move(rows ? row : col); if (v < 1 || v > (rows ? 1048576 : 16384)) return "#REF!";
+            return Cell(ca.Groups[1].Value, rows ? col : v, ca.Groups[3].Value, rows ? v : row);
+        }
+        var cb = CellRef.Match(b);
+        if (ca.Success && cb.Success)
+        {
+            int c1 = Letters(ca.Groups[2].Value), c2 = Letters(cb.Groups[2].Value);
+            int r1 = int.Parse(ca.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture), r2 = int.Parse(cb.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var s = rows ? span(Math.Min(r1, r2), Math.Max(r1, r2)) : span(Math.Min(c1, c2), Math.Max(c1, c2));
+            if (s == null) return "#REF!";
+            var (x1, x2) = s.Value; if (x2 > (rows ? 1048576 : 16384)) return "#REF!";
+            return rows ? Cell(ca.Groups[1].Value, c1, ca.Groups[3].Value, x1) + ":" + Cell(cb.Groups[1].Value, c2, cb.Groups[3].Value, x2)
+                        : Cell(ca.Groups[1].Value, x1, ca.Groups[3].Value, r1) + ":" + Cell(cb.Groups[1].Value, x2, cb.Groups[3].Value, r2);
+        }
+        var la = ColRef.Match(a); var lb = ColRef.Match(b);
+        if (la.Success && lb.Success)   // whole columns, such as A:C
+        {
+            if (rows) return a + ":" + b;
+            var s = span(Math.Min(Letters(la.Groups[2].Value), Letters(lb.Groups[2].Value)), Math.Max(Letters(la.Groups[2].Value), Letters(lb.Groups[2].Value)));
+            if (s == null || s.Value.Item2 > 16384) return "#REF!";
+            return la.Groups[1].Value + ExcelViewer.Core.CacheBuilder.Letters(s.Value.Item1) + ":" + lb.Groups[1].Value + ExcelViewer.Core.CacheBuilder.Letters(s.Value.Item2);
+        }
+        var ra = RowRef.Match(a); var rb = RowRef.Match(b);
+        if (ra.Success && rb.Success)   // whole rows, such as 3:5
+        {
+            if (!rows) return a + ":" + b;
+            int x = int.Parse(ra.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture), y = int.Parse(rb.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var s = span(Math.Min(x, y), Math.Max(x, y));
+            if (s == null || s.Value.Item2 > 1048576) return "#REF!";
+            return ra.Groups[1].Value + s.Value.Item1.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + rb.Groups[1].Value + s.Value.Item2.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return null;
+    }
+    static string Cell(string absCol, int col, string absRow, int row) => absCol + ExcelViewer.Core.CacheBuilder.Letters(col) + absRow + row.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }

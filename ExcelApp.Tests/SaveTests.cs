@@ -29,7 +29,7 @@ public static class SaveTests
         if (Machine.Commit() >= Machine.StopAt) { check("live save memory available", false, "memory"); return; }
         string root = @"D:\ExcelAppTest"; Directory.CreateDirectory(root);
         string id = Guid.NewGuid().ToString("N")[..8];
-        string source = Path.Combine(root, "syn-save-" + id + ".xlsx"), target = Path.Combine(root, "syn-saved-" + id + ".xlsx"), protectedPath = Path.Combine(root, "syn-protected-" + id + ".xlsx");
+        string source = Path.Combine(root, "syn-save-" + id + ".xlsx"), target = Path.Combine(root, "syn-saved-" + id + ".xlsx"), structTarget = Path.Combine(root, "syn-struct-" + id + ".xlsx"), protectedPath = Path.Combine(root, "syn-protected-" + id + ".xlsx");
         try
         {
             Make(source, false); Make(protectedPath, true);
@@ -86,6 +86,19 @@ public static class SaveTests
                 using (var reader = new SheetReader(cache,cache.Sheets[0])) check("save " + label + " cache values", reader.Cell(1,1).Text == "25" && reader.Cell(1,2).Text == "50", "");
                 check("save " + label + " no part", !File.Exists(CachePolicy.PathFor(target)+".part") && !File.Exists(CachePolicy.SidecarPathFor(target)+".part"), "");
             }
+            // Inserted and deleted rows and columns are replayed in Excel first; the cells are then written at the new addresses.
+            var sjob = new SaveBack.Job { Source = source, Target = structTarget, SameFile = false,
+                Structure = new() { new SaveBack.Structure { Sheet = "syn-one", Rows = true, At = 2, Count = 1, Insert = true }, new SaveBack.Structure { Sheet = "syn-one", Rows = false, At = 5, Count = 1, Insert = false } },
+                Edits = new() { new SaveBack.Edit { Sheet = "syn-one", Row = 2, Col = 1, Kind = EditKind.Text, Text = "inserted" } } };
+            output = new StringWriter();
+            int scode = SaveBack.Run(new StringReader(JsonSerializer.Serialize(sjob)), output);
+            check("save structure result", scode == 0, "code=" + scode);
+            if (scode == 0) WithBook(structTarget, (xl, wb) => {
+                dynamic ws = wb.Worksheets[1];
+                check("save structure: the inserted row holds the new cell", (string)ws.Cells[2, 1].Value2 == "inserted", "");
+                check("save structure: the old row moved down and Excel moved its formula", (string)ws.Cells[3, 1].Value2 == "text" && (string)ws.Cells[3, 3].Formula == "=B3*2", (string)ws.Cells[3, 3].Formula);
+                check("save structure: the deleted column is gone", ws.Cells[1, 5].Value2 == null && (string)ws.Cells[1, 4].Value2 == "money", "");
+            });
             byte[] hash = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(source));
             var attr = File.GetAttributes(source);
             try {
@@ -100,7 +113,7 @@ public static class SaveTests
         }
         catch (Exception e) { check("save live exception",false,e.GetType().Name); }
         finally {
-            foreach (string path in new[]{source,target,protectedPath}) { CachePolicy.Delete(CachePolicy.PathFor(path)); CachePolicy.Delete(CachePolicy.PathFor(path)+".part"); CachePolicy.Delete(CachePolicy.SidecarPathFor(path)); CachePolicy.Delete(CachePolicy.SidecarPathFor(path)+".part"); if(File.Exists(path))File.Delete(path); }
+            foreach (string path in new[]{source,target,structTarget,protectedPath}) { CachePolicy.Delete(CachePolicy.PathFor(path)); CachePolicy.Delete(CachePolicy.PathFor(path)+".part"); CachePolicy.Delete(CachePolicy.SidecarPathFor(path)); CachePolicy.Delete(CachePolicy.SidecarPathFor(path)+".part"); if(File.Exists(path))File.Delete(path); }
         }
     }
     static bool InOrder(string text, params string[] tokens) { int at=0; foreach(var token in tokens) { int next=text.IndexOf(token,at,StringComparison.Ordinal); if(next<0)return false; at=next+token.Length; }return true; }

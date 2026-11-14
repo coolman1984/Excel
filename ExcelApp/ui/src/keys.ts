@@ -37,6 +37,7 @@ export const BINDINGS: Binding[] = [
     { command: "formatDate", key: "#", ctrl: true, shift: true, label: "Ctrl+Shift+#" },
     { command: "formatTime", key: "@", ctrl: true, shift: true, label: "Ctrl+Shift+@" },
     { command: "formatNumber", key: "!", ctrl: true, shift: true, label: "Ctrl+Shift+!" },
+    { command: "insertCells", key: "+", ctrl: true, shift: true, label: "Ctrl++" },
 
     // Ctrl + arrows (jump to edge of data)
     { command: "edgeUp", key: "ArrowUp", ctrl: true, label: "Ctrl+Up" },
@@ -64,6 +65,8 @@ export const BINDINGS: Binding[] = [
     { command: "undo", key: "z", ctrl: true, label: "Ctrl+Z" },
     { command: "bold", key: "b", ctrl: true, label: "Ctrl+B" },
     { command: "fillDown", key: "d", ctrl: true, label: "Ctrl+D" },
+    { command: "insertCells", key: "+", ctrl: true, label: "Ctrl++ (number pad)" },
+    { command: "deleteCells", key: "-", ctrl: true, label: "Ctrl+-" },
     { command: "fillRight", key: "r", ctrl: true, label: "Ctrl+R" },
     { command: "insertDate", key: ";", ctrl: true, label: "Ctrl+;" },
     { command: "formatCells", key: "1", ctrl: true, label: "Ctrl+1" },

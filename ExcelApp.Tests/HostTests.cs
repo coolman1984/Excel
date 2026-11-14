@@ -354,6 +354,21 @@ public static class HostTests
             check("agent: outside the data is refused plainly", Call(b, "agent.write", new { start = "XFD1", values = new[] { new[] { 1 } } }, false).GetString()!.Contains("outside"), "");
             check("agent: an unknown sheet names the sheets", Call(b, "agent.read", new { sheet = "Nope", range = "A1" }, false).GetString()!.Contains("Sheets:"), "");
         });
+        Try("insert and delete", () =>
+        {
+            string a2 = Text(b, 0, 1, 0), a3 = Text(b, 0, 2, 0);
+            var r = Call(b, "insertRows", new { sheet = 0, row = 1, count = 2 });
+            check("insert rows: blank rows, the rest moves down", r.GetProperty("structure").GetBoolean() && Text(b, 0, 1, 0) == "" && Text(b, 0, 3, 0) == a2, Text(b, 0, 3, 0));
+            Call(b, "setCell", new { sheet = 0, row = 1, col = 0, input = "new" });
+            check("insert rows: typing in an inserted row", Text(b, 0, 1, 0) == "new", "");
+            Call(b, "undo", new { sheet = 0 }); Call(b, "undo", new { sheet = 0 });
+            check("insert rows: undo puts the sheet back", Text(b, 0, 1, 0) == a2 && Text(b, 0, 2, 0) == a3, Text(b, 0, 1, 0));
+            Call(b, "deleteCols", new { sheet = 0, col = 0, count = 1 });
+            check("delete column: the next column moves left", Text(b, 0, 0, 0) == "Qty", Text(b, 0, 0, 0));
+            Call(b, "undo", new { sheet = 0 });
+            check("delete column: undo", Text(b, 0, 0, 0) == "Name", Text(b, 0, 0, 0));
+            check("delete rows: a sheet keeps one row", Call(b, "deleteRows", new { sheet = 0, row = 0, count = 1_000_000 }, false).GetString()!.Length > 0, "");
+        });
         Try("filter and sort", () =>
         {
             var r = Call(b, "setFilter", new { sheet = 0, col = 1, condition = new { kind = "number", op = "gt", a = 10 } });
