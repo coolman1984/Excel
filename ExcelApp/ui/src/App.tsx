@@ -11,6 +11,7 @@ import { StatusBar } from "./bars/StatusBar";
 import { Dialogs } from "./dialogHost";
 import { increaseDecimals, decreaseDecimals, PERCENT_CODE, COMMA_CODE, GENERAL } from "./numberFormat";
 import { SHORTCUT_FORMATS, fillRange, todayInput, timeInput } from "./shortcuts";
+import { AgentPanel } from "./agent/AgentPanel";
 import type { WorkbookInfo, SheetInfo, Stats, CellStyle, Condition, SortKey } from "./types";
 
 type AppState = "empty" | "opening" | "ready";
@@ -92,8 +93,18 @@ export function App(): React.ReactElement {
         }
     }, []);
 
+    const sheetRef = React.useRef(0);
+    sheetRef.current = sheetIndex;
+    const [agentOpen, setAgentOpen] = React.useState(false);
+
     React.useEffect(() => {
         const offs: (() => void)[] = [];
+        // An AI agent changed the workbook through ExcelApp's MCP tools: read the sheet, the visible cells and the saved state again.
+        offs.push(onEvent("agentChanged", () => {
+            void loadSheet(sheetRef.current).catch(() => {});
+            gridRef.current?.refresh();
+            call<any>("workbook").then((w) => setDirty(!!w?.dirty)).catch(() => {});
+        }));
         offs.push(
             onEvent("opening", (e) => {
                 setState("opening");
@@ -705,6 +716,9 @@ export function App(): React.ReactElement {
                     <button type="button" className={mode === "editor" ? "active" : ""} aria-pressed={mode === "editor"} onClick={() => setMode("editor")}>Editor</button>
                     <button type="button" className={mode === "data" ? "active" : ""} aria-pressed={mode === "data"} onClick={() => setMode("data")}>Data</button>
                 </div>
+                <button type="button" className={"agentToggle" + (agentOpen ? " active" : "")} aria-pressed={agentOpen} onClick={() => setAgentOpen((o) => !o)} data-testid="agent-toggle" title="Ask Claude Code or Codex to work in ExcelApp">
+                    ✦ Agent
+                </button>
                 <span className="autoSavePill">AutoSave Off</span>
             </div>
             <div style={{ display: mode === "editor" ? "contents" : "none" }}>
@@ -868,6 +882,7 @@ export function App(): React.ReactElement {
 
             </div>
             {mode === "data" && <React.Suspense fallback={<div className="data-loading" role="status">Loading Data...</div>}><DataApp /></React.Suspense>}
+            {agentOpen && <AgentPanel onClose={() => setAgentOpen(false)} />}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>

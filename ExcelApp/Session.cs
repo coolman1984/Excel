@@ -90,8 +90,12 @@ public sealed partial class Session : IDisposable
         S("log", a => { string t = Arg.Str(a, "text") ?? ""; if (System.Text.RegularExpressions.Regex.IsMatch(t, @"\A(?:paint|firstScreen|jump) [0-9]{1,9}(?:\.[0-9]{1,3})? ms\z")) Log.Write("ui " + t); return new { }; });
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
         RegisterAgent(h);  // AI agents: read and write by Excel address (SessionAgent.cs)
+        Agents?.Register(h); // the Agent panel: Claude Code CLI / Codex CLI
         Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }
+
+    /// <summary>Runs Claude Code CLI or Codex CLI for the Agent panel; null in tests.</summary>
+    public Agent.AgentRunner? Agents;
 
     /// <summary>Plan 4 data engine; null in tests and the self test.</summary>
     public Data.DataHost? Data;

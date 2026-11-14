@@ -25,6 +25,8 @@ public sealed class MainForm : Form
         Session = new Session();
         Session.Data = ExcelApp.Data.DataHost.Create((name, payload) => Session.Emit(name, payload)); // plan 4
         if (Session.Data.Services != null) Session.Journal = new EditJournal(Session.Data.Services.Store); // auto-save journal in the store
+        var agentConfig = Session.Data.Services?.Config ?? ExcelApp.Data.ConfigRoot.Production();
+        Session.Agents = new ExcelApp.Agent.AgentRunner(Environment.ProcessPath ?? Application.ExecutablePath, agentConfig, e => Session.Emit("agent.event", new { e.Kind, e.Text }));
         Bridge = new Bridge(Session);
         Session.PickOpenPath = () => OnUi(() =>
         {
@@ -53,7 +55,7 @@ public sealed class MainForm : Form
         // AI agents (owner's decision, 2026-11-14) reach the open workbook through ExcelApp.exe --mcp and this door.
         agentLink = new ExcelApp.Agent.AgentLink(Bridge.Dispatch, cmd => Bridge.Notify("agentChanged", new { Cmd = cmd }));
         agentLink.Start();
-        FormClosed += (s, e) => agentLink.Dispose();
+        FormClosed += (s, e) => { agentLink.Dispose(); Session.Agents?.Dispose(); };
     }
 
     // The built interface next to the program; else the temporary stub of the source tree.
