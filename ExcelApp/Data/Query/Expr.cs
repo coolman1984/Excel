@@ -10,6 +10,27 @@ public sealed class Expr
     public double? Evaluate(Table table, int row) => evaluate(table, row);
     public static Expr Parse(string text) => new(new Parser(text).Parse());
 
+    /// <summary>The column names an expression reads: [Any name] and bare names that are not followed by "(".</summary>
+    public static IReadOnlyList<string> Columns(string text)
+    {
+        var names = new List<string>(); int i = 0;
+        while (i < text.Length)
+        {
+            char c = text[i];
+            if (c == '[') { int end = text.IndexOf(']', i + 1); if (end < 0) break; if (end > i + 1) names.Add(text[(i + 1)..end]); i = end + 1; continue; }
+            if (char.IsDigit(c) || c == '.') { while (i < text.Length && (char.IsDigit(text[i]) || text[i] == '.')) i++; continue; }
+            if (char.IsLetter(c) || c == '_')
+            {
+                int start = i; while (i < text.Length && (char.IsLetterOrDigit(text[i]) || text[i] == '_')) i++;
+                int j = i; while (j < text.Length && char.IsWhiteSpace(text[j])) j++;
+                if (j >= text.Length || text[j] != '(') names.Add(text[start..i]);
+                continue;
+            }
+            i++;
+        }
+        return names;
+    }
+
     sealed class Parser
     {
         readonly string text; int pos;

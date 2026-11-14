@@ -92,6 +92,7 @@ public sealed class SandboxProvider : ITableProvider
 {
     readonly ITableProvider inner; readonly Sandboxes sandboxes; public SandboxProvider(ITableProvider inner, Sandboxes sandboxes) { this.inner = inner; this.sandboxes = sandboxes; }
     public Table Get(TableRef r) => r.Kind == "sandbox" ? sandboxes.Get(r.Id) : inner.Get(r);
+    public Table Get(TableRef r, IReadOnlyCollection<string>? columns) => r.Kind == "sandbox" ? sandboxes.Get(r.Id) : inner.Get(r, columns);
     public IReadOnlyList<TableInfo> List() => inner.List(); public SourceInfo? SourceOf(int id) => inner.SourceOf(id);
     public int SaveAsVersion(string reportTypeId, string period, Table data, string note) => inner.SaveAsVersion(reportTypeId, period, data, note);
 }

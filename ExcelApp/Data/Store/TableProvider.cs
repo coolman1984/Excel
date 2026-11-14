@@ -4,23 +4,43 @@ public sealed class TableProvider : ITableProvider
 {
     readonly StoreRoot root; readonly Catalog catalog; readonly object gate=new(); readonly Dictionary<string,Table> cached=new();
     public TableProvider(StoreRoot root,Catalog catalog) {this.root=root;this.catalog=catalog;}
-    public void Invalidate(string report) {lock(gate) foreach(var key in cached.Keys.Where(k=>k.StartsWith(report+"|",StringComparison.Ordinal)).ToArray()) cached.Remove(key);}
-    public Table Get(TableRef reference) {
-        if(reference.Kind=="table") { var snapshot=catalog.Snapshot(); var entry=snapshot.Workspace.FirstOrDefault(x=>x.Info.Id==reference.Id); if(entry!=null) return TableFile.Open(root,entry.RelativePath).Load(); var info=snapshot.Tables.FirstOrDefault(x=>x.Kind=="table" && x.Id==reference.Id) ?? throw new UserError("The table was not found."); return TableFile.Open(root,$"tables/{info.Group}/{info.Id}.xvt").Load(); }
+    readonly List<string> order=new();   // the cached unions, oldest first
+    /// <summary>How many report unions are kept in memory: a 12-period union of a wide report is large, so only the last few stay.</summary>
+    public const int MaxCached=4;
+    public int CachedCount {get {lock(gate) return cached.Count;}}
+    public void Invalidate(string report) {lock(gate) foreach(var key in cached.Keys.Where(k=>k.StartsWith(report+"|",StringComparison.Ordinal)).ToArray()) {cached.Remove(key);order.Remove(key);}}
+    public Table Get(TableRef reference) => Get(reference,null);
+    /// <summary>Loads only the asked columns (plus the lineage columns _v and _r) from every period file; null loads them all.</summary>
+    public Table Get(TableRef reference,IReadOnlyCollection<string>? columns) {
+        string[]? want=columns==null?null:columns.Concat(new[]{"_v","_r"}).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        Table Open(string relative) {var lazy=TableFile.Open(root,relative);return want==null?lazy.Load():lazy.Load(want);}
+        if(reference.Kind=="table") { var snapshot=catalog.Snapshot(); var entry=snapshot.Workspace.FirstOrDefault(x=>x.Info.Id==reference.Id); if(entry!=null) return Open(entry.RelativePath); var info=snapshot.Tables.FirstOrDefault(x=>x.Kind=="table" && x.Id==reference.Id) ?? throw new UserError("The table was not found."); return Open($"tables/{info.Group}/{info.Id}.xvt"); }
         var cat=catalog.Snapshot();
-        if(reference.Kind=="version") {foreach(var report in cat.ReportTypes) foreach(var (period,p) in new Versions(root,report).Snapshot().Periods) {var v=p.Versions.FirstOrDefault(x=>x.VersionId.ToString(CultureInfo.InvariantCulture)==reference.Id); if(v!=null) return TableFile.Open(root,$"reports/{report}/{period}/v{v.Version}.xvt").Load();} throw new UserError("The version was not found.");}
+        if(reference.Kind=="version") {foreach(var report in cat.ReportTypes) foreach(var (period,p) in new Versions(root,report).Snapshot().Periods) {var v=p.Versions.FirstOrDefault(x=>x.VersionId.ToString(CultureInfo.InvariantCulture)==reference.Id); if(v!=null) return Open($"reports/{report}/{period}/v{v.Version}.xvt");} throw new UserError("The version was not found.");}
         if(reference.Kind!="report") throw new UserError("The table was not found.");
-        string key=$"{reference.Id}|{reference.Truth}|{reference.AsOf}|{reference.Version}"; lock(gate) if(cached.TryGetValue(key,out var hit)) return hit;
+        string baseKey=$"{reference.Id}|{reference.Truth}|{reference.AsOf}|{reference.Version}";
+        string key=baseKey+"|"+(want==null?"*":string.Join(",",want.Select(x=>x.ToUpperInvariant()).OrderBy(x=>x,StringComparer.Ordinal)));
+        lock(gate) {if(cached.TryGetValue(key,out var hit)) return hit; if(cached.TryGetValue(baseKey+"|*",out var full)) return full;}
         DateTime? time=reference.AsOf==null?null:DateTime.Parse(reference.AsOf,CultureInfo.InvariantCulture);
         var state=new Versions(root,reference.Id).Snapshot(); var tables=new List<Table>();
-        foreach(var (period,p) in state.Periods.OrderBy(x=>x.Key,StringComparer.Ordinal)) {var v=Versions.Select(p,reference.Truth,time,reference.Version); if(v!=null) tables.Add(TableFile.Open(root,$"reports/{reference.Id}/{period}/v{v.Version}.xvt").Load());}
-        var union=Union(reference.Id,tables); lock(gate) cached[key]=union; return union;
+        foreach(var (period,p) in state.Periods.OrderBy(x=>x.Key,StringComparer.Ordinal)) {var v=Versions.Select(p,reference.Truth,time,reference.Version); if(v!=null) tables.Add(Open($"reports/{reference.Id}/{period}/v{v.Version}.xvt"));}
+        var union=Union(reference.Id,tables);
+        lock(gate) {cached[key]=union; order.Remove(key); order.Add(key); while(order.Count>MaxCached) {cached.Remove(order[0]); order.RemoveAt(0);}}
+        return union;
     }
     public static Table Union(string name,IReadOnlyList<Table> tables) {
         if(tables.Count==0) return new Table(name,Array.Empty<Column>());
         int rows=checked(tables.Sum(x=>x.Rows)); var names=tables.SelectMany(x=>x.Columns).Select(x=>x.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(); var columns=new List<Column>();
         foreach(var colName in names) {var types=tables.Select(t=>t[colName]).Where(c=>c!=null).Select(c=>c!.Type).Distinct().ToArray();var type=types.Length==1?types[0]:ColType.Text;
-            if(type==ColType.Text) {var vals=new string?[rows]; int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) if(c!=null && !c.IsNull(i)) vals[offset+i]=c.Text(i); offset+=t.Rows;} columns.Add(TextColumn.From(colName,vals));}
+            if(type==ColType.Text && tables.All(t=>t[colName] is null or TextColumn)) {
+                // Merge the period dictionaries instead of making one string per row: 12 million rows stay a few int arrays.
+                var map=new Dictionary<string,int>(StringComparer.Ordinal); var dict=new List<string>(); var codes=new int[rows]; int offset=0;
+                foreach(var t in tables) {var c=t[colName] as TextColumn;
+                    if(c==null) {Array.Fill(codes,-1,offset,t.Rows); offset+=t.Rows; continue;}
+                    var remap=new int[c.Dict.Length]; for(int d=0;d<remap.Length;d++) {if(!map.TryGetValue(c.Dict[d],out int id)) {id=dict.Count; map[c.Dict[d]]=id; dict.Add(c.Dict[d]);} remap[d]=id;}
+                    for(int i=0;i<t.Rows;i++) {int code=c.Codes[i]; codes[offset+i]=code<0?-1:remap[code];} offset+=t.Rows;}
+                columns.Add(new TextColumn(colName,codes,dict.ToArray()));}
+            else if(type==ColType.Text) {var vals=new string?[rows]; int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) if(c!=null && !c.IsNull(i)) vals[offset+i]=c.Text(i); offset+=t.Rows;} columns.Add(TextColumn.From(colName,vals));}
             else if(type==ColType.Bool) {var vals=new sbyte[rows]; Array.Fill(vals,(sbyte)-1); int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) if(c!=null && !c.IsNull(i)) vals[offset+i]=(sbyte)c.Num(i); offset+=t.Rows;} columns.Add(new BoolColumn(colName,vals));}
             else {var vals=new double[rows]; var nulls=new bool[rows]; int offset=0; foreach(var t in tables) {var c=t[colName]; for(int i=0;i<t.Rows;i++) {nulls[offset+i]=c==null || c.IsNull(i); if(!nulls[offset+i]) vals[offset+i]=c!.Num(i);} offset+=t.Rows;} columns.Add(new NumberColumn(colName,vals,nulls.Any(x=>x)?nulls:null,type));}
         } return new Table(name,columns);

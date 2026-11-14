@@ -137,6 +137,9 @@ public sealed record SourceInfo(
 public interface ITableProvider
 {
     Table Get(TableRef r);                         // throws UserError (plain sentence) when it does not exist
+    /// <summary>The same table with only these columns loaded (plus lineage), so a question over 300 columns reads only what it uses.
+    /// Null means every column. A provider may return more columns than asked; never fewer that exist.</summary>
+    Table Get(TableRef r, IReadOnlyCollection<string>? columns) => Get(r);
     IReadOnlyList<TableInfo> List();
     SourceInfo? SourceOf(int versionId);
     /// <summary>Stores a table as a new version of a report type's period (used by sandbox "keep", plan idea 15). Returns the period version number.</summary>

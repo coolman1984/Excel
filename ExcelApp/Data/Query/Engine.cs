@@ -8,8 +8,9 @@ public static class Engine
 {
     public static QueryResult Run(QuerySpec spec, ITableProvider provider, CancellationToken token)
     {
-        Table table = provider.Get(spec.Source);
-        foreach (var join in spec.Joins ?? new()) table = Join.Run(table, provider.Get(join.Right), join, token);
+        var needed = Needed(spec);
+        Table table = provider.Get(spec.Source, needed);
+        foreach (var join in spec.Joins ?? new()) table = Join.Run(table, provider.Get(join.Right, RightNeeded(needed, join)), join, token);
         var rows = Enumerable.Range(0, table.Rows).ToArray();
         if (spec.Where is { } where) { var predicate = Pred.Compile(where, table); rows = rows.Where(r => { token.ThrowIfCancellationRequested(); return predicate(r); }).ToArray(); }
         if (spec.Computed is { Count: > 0 })
@@ -77,6 +78,45 @@ public static class Engine
         var selected = spec.Columns is { Count: > 0 } ? spec.Columns.Select(n => table[n] ?? throw new ArgumentException("Unknown projected column.")).ToList() : table.Columns.ToList();
         if (spec.GroupBy is not { Count: > 0 } && spec.Aggregates is not { Count: > 0 }) foreach (var c in table.Columns.Where(c => c.Name is "_v" or "_r")) if (!selected.Contains(c)) selected.Add(c);
         return new QueryResult(new Table(table.Name, selected.Select(c => Gather(c, rows)).ToArray()));
+    }
+    /// <summary>The columns a question reads, or null when it shows every column. A store with 300 columns then loads only these.</summary>
+    internal static HashSet<string>? Needed(QuerySpec spec)
+    {
+        if (spec.Columns is not { Count: > 0 } && spec.GroupBy is not { Count: > 0 } && spec.Aggregates is not { Count: > 0 }) return null;
+        var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_v", "_r" };
+        foreach (var c in spec.Columns ?? new()) s.Add(c);
+        foreach (var c in spec.GroupBy ?? new()) s.Add(c);
+        foreach (var a in spec.Aggregates ?? new()) if (a.Col != null) s.Add(a.Col);
+        foreach (var o in spec.Sort ?? new()) s.Add(o.Col);
+        foreach (var c in spec.Computed ?? new()) foreach (var n in Expr.Columns(c.Expr)) s.Add(n);
+        if (spec.Where is { } w) PredColumns(w, s);
+        if (spec.Having is { } h) PredColumns(h, s);
+        foreach (var j in spec.Joins ?? new()) foreach (var k in j.On) s.Add(k.Left);
+        return s;
+    }
+    static void PredColumns(System.Text.Json.JsonElement e, HashSet<string> into)
+    {
+        if (e.ValueKind == System.Text.Json.JsonValueKind.Array) { foreach (var x in e.EnumerateArray()) PredColumns(x, into); return; }
+        if (e.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+        foreach (var p in e.EnumerateObject())
+        {
+            if (p.NameEquals("col") && p.Value.ValueKind == System.Text.Json.JsonValueKind.String) into.Add(p.Value.GetString()!);
+            else if (p.NameEquals("cols") && p.Value.ValueKind == System.Text.Json.JsonValueKind.Array) { foreach (var x in p.Value.EnumerateArray()) if (x.ValueKind == System.Text.Json.JsonValueKind.String) into.Add(x.GetString()!); }
+            else PredColumns(p.Value, into);
+        }
+    }
+    /// <summary>The right side of a join reads its keys and any used name, with the join's prefix (or "right.") taken off.</summary>
+    static HashSet<string>? RightNeeded(HashSet<string>? needed, JoinSpec join)
+    {
+        if (needed == null) return null;
+        var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in join.On) s.Add(k.Right);
+        foreach (var n0 in needed)
+        {
+            string n = n0.StartsWith("right.", StringComparison.OrdinalIgnoreCase) ? n0[6..] : n0; s.Add(n);
+            if (!string.IsNullOrEmpty(join.Prefix) && n.StartsWith(join.Prefix, StringComparison.OrdinalIgnoreCase)) s.Add(n[join.Prefix.Length..]);
+        }
+        return s;
     }
     sealed class FastState
     {

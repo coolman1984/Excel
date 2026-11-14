@@ -35,6 +35,7 @@ static class TestProgram
             Suite("query", () => QueryTests.Run(Check, offline));
             Suite("automation", () => AutomationTests.Run(Check, offline));
             Suite("formula", () => FormulaTests.Run(Check, offline));
+            Suite("scale", () => ScaleTests.Run(Check, offline));
         }
         catch (Exception e) { Console.WriteLine("ERROR " + e.GetType().Name); return 1; }
         Console.WriteLine($"ExcelApp tests: {pass} passed, {fail} failed{(offline ? " (offline)" : "")}");

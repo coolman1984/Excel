@@ -1,5 +1,11 @@
 # History
 
+## 2026-11-14
+
+- **Scale, measured on made-up 1,000,000 x 300 data (`docs\DECISION-5-SCALE-AND-EXCEL365.md`):** the editor opens the fast copy in 0.1 s, jumps anywhere in under 1 ms, filters in 0.3 to 0.7 s, sorts in 0.4 to 2.2 s and searches all 300 million cells in 1.9 s, all under half a gigabyte of memory. The first open of a new file still waits for Excel (rule 0).
+- **Out of memory, fixed:** every Data question loaded every column of every period. A sum by region over a 3-month report of 1M x 300 per month ran out of memory on 15 GB. Questions now read only the columns they use (1.5 s, 437 MB). Report unions keep text dictionary-coded, and only the last 4 unions stay in memory. New offline `scale` suite.
+- **Owner decisions written down:** how AI may read the data without breaking rule 0, the dashboard designer, and the order of the missing Excel 365 features.
+
 ## 2026-11-13
 
 - **Formulas calculate in the editor:** typed formulas show their results, recalculated on every edit, with about 170 functions; fill and paste move relative references.
