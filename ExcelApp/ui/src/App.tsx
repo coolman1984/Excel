@@ -13,6 +13,7 @@ import { increaseDecimals, decreaseDecimals, PERCENT_CODE, COMMA_CODE, GENERAL }
 import { SHORTCUT_FORMATS, fillRange, todayInput, timeInput } from "./shortcuts";
 import { AgentPanel } from "./agent/AgentPanel";
 import { ChartLayer, type ChartWire } from "./charts/ChartLayer";
+import { PivotPanel } from "./pivot/PivotPanel";
 import type { WorkbookInfo, SheetInfo, Stats, CellStyle, Condition, SortKey } from "./types";
 
 type AppState = "empty" | "opening" | "ready";
@@ -97,6 +98,7 @@ export function App(): React.ReactElement {
     const sheetRef = React.useRef(0);
     sheetRef.current = sheetIndex;
     const [agentOpen, setAgentOpen] = React.useState(false);
+    const [pivotRange, setPivotRange] = React.useState<number[] | null>(null);
     // Charts of the current sheet, read again after anything that can change their numbers or cards
     const [charts, setCharts] = React.useState<ChartWire[]>([]);
     const chartsFor = React.useRef({ state: "", sheet: 0 });
@@ -808,6 +810,7 @@ export function App(): React.ReactElement {
                 onFormatCells={onFormatCells}
                 onStructure={(k) => void doStructure(k)}
                 onChart={(t) => void addChart(t)}
+                onPivot={() => { setAgentOpen(false); setPivotRange([selection.r1, selection.c1, selection.r2, selection.c2]); }}
                 onClearAll={onClearAll}
                 onClearContents={onClearContents}
                 onClearFormats={onClearFormats}
@@ -945,6 +948,10 @@ export function App(): React.ReactElement {
             </div>
             {mode === "data" && <React.Suspense fallback={<div className="data-loading" role="status">Loading Data...</div>}><DataApp /></React.Suspense>}
             {agentOpen && <AgentPanel onClose={() => setAgentOpen(false)} />}
+            {pivotRange && state === "ready" && (
+                <PivotPanel sheet={sheetIndex} range={pivotRange} onClose={() => setPivotRange(null)}
+                    onPlaced={(where) => { setPivotRange(null); void reloadStructure(sheetIndex).then(() => { void loadCharts(); setStatus(`PivotTable placed in ${where}`); }); }} />
+            )}
             {dialog !== null &&
                 React.createElement(Dialogs[dialog.name as keyof typeof Dialogs] as React.ComponentType<any>, dialog.props)}
             <span className="paintMs" data-testid="paintMs" style={{ display: "none" }}>

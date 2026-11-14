@@ -168,6 +168,45 @@ export class MockHost {
         return { sheet: args.sheet ?? this.current, structure: true, rows: s.rows, cols: s.cols, viewRows: s.rows, dirty: true, canUndo: false, canRedo: false };
     }
 
+    // ---- PivotTables for the browser preview (the real work is the C# host on the Data engine)
+    private pivotData(args: any): { names: string[]; rows: CellData[][]; r1: number; c1: number; c2: number } {
+        let [r1, c1, r2, c2] = args.range as number[];
+        if (r1 === r2 && c1 === c2) { r1 = 0; c1 = 0; r2 = 50; c2 = 6; }
+        const names = []; for (let c = c1; c <= c2; c++) names.push(this.cellAt(r1, c).text || "Column " + this.letter(c));
+        const rows = []; for (let r = r1 + 1; r <= r2; r++) { const row = []; for (let c = c1; c <= c2; c++) row.push(this.cellAt(r, c)); rows.push(row); }
+        return { names, rows, r1, c1, c2 };
+    }
+    private num(v: CellData): number | null { const n = parseFloat(String(v.text).replace(/[$,%]/g, "")); return v.kind === 1 && isFinite(n) ? n : null; }
+    private pivotFields(args: any): any {
+        const d = this.pivotData(args);
+        return { range: "", rows: d.rows.length, fields: d.names.map((name, i) => ({ name, type: d.rows.filter((r) => this.num(r[i]) != null).length >= d.rows.length * 0.8 ? "number" : "text" })) };
+    }
+    private pivotRun(args: any): any {
+        const d = this.pivotData(args); const idx = (n: string) => d.names.indexOf(n);
+        const agg = (rows: CellData[][], v: { field: string; fn: string }) => {
+            const xs = rows.map((r) => r[idx(v.field)]).filter((c) => c.kind !== 0); const ns = xs.map((c) => this.num(c)).filter((n): n is number => n != null);
+            if (v.fn === "count") return xs.length; if (!ns.length) return null;
+            return v.fn === "sum" ? ns.reduce((a, b) => a + b, 0) : v.fn === "avg" ? ns.reduce((a, b) => a + b, 0) / ns.length : v.fn === "min" ? Math.min(...ns) : Math.max(...ns);
+        };
+        const key = (r: CellData[], fs: string[]) => fs.map((f) => r[idx(f)].text || "(blank)");
+        const groups = new Map<string, CellData[][]>();
+        for (const r of d.rows) { const k = key(r, args.rows).join("\u0001"); (groups.get(k) ?? groups.set(k, []).get(k)!).push(r); }
+        const colKeys = args.column ? [...new Set(d.rows.map((r) => r[idx(args.column)].text || "(blank)"))].sort() : [];
+        const cellsFor = (rs: CellData[][]) => (args.column ? colKeys.map((k) => args.values.map((v: any) => { const sub = rs.filter((r) => (r[idx(args.column)].text || "(blank)") === k); return sub.length ? agg(sub, v) : null; })) : [args.values.map((v: any) => agg(rs, v))]);
+        const rows = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([k, rs]) => ({ keys: k.split("\u0001"), cells: cellsFor(rs), total: args.values.map((v: any) => agg(rs, v)) }));
+        const labels = args.values.map((v: any) => ({ sum: "Sum of ", count: "Count of ", avg: "Average of ", min: "Min of ", max: "Max of " } as any)[v.fn] + v.field);
+        return { range: "", rowFields: args.rows, columnField: args.column ?? null, valueLabels: labels, columnKeys: colKeys, rows, columnTotals: cellsFor(d.rows), grand: args.values.map((v: any) => agg(d.rows, v)), truncated: false };
+    }
+    private pivotPlace(args: any): any {
+        const p = this.pivotRun(args), d = this.pivotData(args); const left = d.c2 + 2;
+        const lines: (string | number | null)[][] = [[...(p.rowFields.length ? p.rowFields : [""]), ...p.valueLabels]];
+        for (const r of p.rows) lines.push([...r.keys, ...r.total]);
+        lines.push(["Grand Total", ...p.rowFields.slice(1).map(() => null), ...p.grand]);
+        lines.forEach((line, i) => line.forEach((v, j) => this.valueEdits.set(this.keyFor(d.r1 + i, left + j), v == null ? { text: "", kind: 0, align: 0 } : typeof v === "number" ? { text: String(+v.toFixed(2)), kind: 1, align: 1 } : { text: v, kind: 2, align: 0, style: i === 0 || v === "Grand Total" ? { bold: true } : undefined })));
+        this.dirty = true;
+        return { placed: `${this.letter(left)}${d.r1 + 1}:${this.letter(left + lines[0].length - 1)}${d.r1 + lines.length}`, structure: false, dirty: true };
+    }
+
     // A pretend Claude Code for the browser preview: it reads two cells, writes one and answers.
     private agentTimers: ReturnType<typeof setTimeout>[] = [];
     private agentStart(args: any): any {
@@ -487,6 +526,9 @@ export class MockHost {
                 this.dirty = true; return { chart: this.chartWire(c), dirty: true };
             }
             case "chart.delete": this.charts = this.charts.filter((x) => x.id !== args.id); this.dirty = true; return { deleted: args.id, dirty: true };
+            case "pivot.fields": return this.pivotFields(args);
+            case "pivot.run": return this.pivotRun(args);
+            case "pivot.place": return this.pivotPlace(args);
             case "agent.status":
                 return { claude: true, codex: false, running: this.agentTimers.length > 0 ? "claude" : null };
             case "agent.start":

@@ -100,6 +100,7 @@ public sealed partial class Session : IDisposable
         S("edge", Edge); S("locate", Locate); S("info", _ => Info());
         RegisterAgent(h);  // AI agents: read and write by Excel address (SessionAgent.cs)
         RegisterCharts(h); // charts (SessionCharts.cs)
+        RegisterPivot(h);  // PivotTables (SessionPivot.cs)
         Agents?.Register(h); // the Agent panel: Claude Code CLI / Codex CLI
         Data?.Register(h); // plan 4: the data engine's "data.*" commands
     }

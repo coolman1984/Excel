@@ -354,6 +354,15 @@ public static class HostTests
             check("agent: outside the data is refused plainly", Call(b, "agent.write", new { start = "XFD1", values = new[] { new[] { 1 } } }, false).GetString()!.Contains("outside"), "");
             check("agent: an unknown sheet names the sheets", Call(b, "agent.read", new { sheet = "Nope", range = "A1" }, false).GetString()!.Contains("Sheets:"), "");
         });
+        Try("pivot and chart", () =>
+        {
+            var p = Call(b, "pivot.run", new { sheet = 0, address = "A1:B5", rows = new[] { "Name" }, values = new[] { new { field = "Qty", fn = "sum" } } });
+            check("pivot: runs on the sheet", p.GetProperty("rows").GetArrayLength() > 0 && p.GetProperty("grand")[0].ValueKind == JsonValueKind.Number, p.ToString());
+            var ch = Call(b, "chart.add", new { sheet = 0, address = "A1:B5", type = "column" });
+            check("chart: added from an address, with points", ch.GetProperty("chart").GetProperty("series").GetArrayLength() == 1, ch.ToString());
+            Call(b, "undo", new { sheet = 0 });
+            check("chart: undo removes it", Call(b, "chart.list", new { sheet = 0 }).GetProperty("charts").GetArrayLength() == 0, "");
+        });
         Try("insert and delete", () =>
         {
             string a2 = Text(b, 0, 1, 0), a3 = Text(b, 0, 2, 0);
