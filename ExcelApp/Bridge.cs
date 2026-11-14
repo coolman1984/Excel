@@ -13,7 +13,7 @@ public sealed class Bridge
     readonly SemaphoreSlim serial = new(1, 1);
     readonly Dictionary<string, Func<JsonElement, Task<object?>>> handlers = new();
     // Commands that only read; they may run beside a long command.
-    static readonly HashSet<string> Parallel = new() { "ready", "recent", "log", "cancelOpen", "cancelSave", "closeAnswer" };
+    static readonly HashSet<string> Parallel = new() { "ready", "recent", "log", "cancelOpen", "cancelSave", "closeAnswer", "agent.status", "agent.stop" };
     public Action<string>? Post;
     static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals };
 
@@ -23,6 +23,9 @@ public sealed class Bridge
         session.Emit = (name, payload) => PostEvent(name, payload);
         session.Register(handlers);
     }
+
+    /// <summary>Tells the interface something happened outside it (an AI agent changed the workbook).</summary>
+    public void Notify(string name, object? payload) => PostEvent(name, payload);
 
     void PostEvent(string name, object? payload)
     {
@@ -45,7 +48,7 @@ public sealed class Bridge
             cmd = root.GetProperty("cmd").GetString() ?? "";
             if (!handlers.TryGetValue(cmd, out var h)) { cmd = "unknown"; throw new UserError("That command is not known."); }
             if (!Parallel.Contains(cmd)) { await serial.WaitAsync(); locked = true; }
-            if (session.Busy && cmd is not ("ready" or "recent" or "log" or "cancelOpen" or "cancelSave" or "closeAnswer"))
+            if (session.Busy && !Parallel.Contains(cmd))
                 throw new UserError("Please wait until the current work is finished.");
             object? result = await h(root);
             if (cmd != "rows" && cmd != "log") Log.Write($"cmd {cmd} {sw.ElapsedMilliseconds} ms");
@@ -58,35 +61,5 @@ public sealed class Bridge
             return JsonSerializer.Serialize(new { id, ok = false, error = text }, Json);
         }
         finally { if (locked) serial.Release(); }
-    }
-}
-
-/// <summary>Reading arguments out of a request.</summary>
-public static class Arg
-{
-    public static int Int(JsonElement e, string name, int? fallback = null)
-    {
-        if (e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number) return (int)v.GetDouble();
-        return fallback ?? throw new UserError("The request is missing a number.");
-    }
-    public static double Num(JsonElement e, string name, double? fallback = null)
-    {
-        if (e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number) return v.GetDouble();
-        return fallback ?? throw new UserError("The request is missing a number.");
-    }
-    public static string? Str(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-    public static bool Bool(JsonElement e, string name, bool fallback = false) => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False ? v.GetBoolean() : fallback;
-    public static JsonElement? Obj(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) ? v : null;
-    public static List<(int R1, int C1, int R2, int C2)> Ranges(JsonElement e, string name = "ranges")
-    {
-        var list = new List<(int, int, int, int)>();
-        if (!e.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
-        foreach (var r in arr.EnumerateArray()) list.Add(Rect(r));
-        return list;
-    }
-    public static (int R1, int C1, int R2, int C2) Rect(JsonElement r)
-    {
-        int a = r[0].GetInt32(), b = r[1].GetInt32(), c = r[2].GetInt32(), d = r[3].GetInt32();
-        return (Math.Min(a, c), Math.Min(b, d), Math.Max(a, c), Math.Max(b, d));
     }
 }

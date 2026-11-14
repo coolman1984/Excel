@@ -340,6 +340,20 @@ public static class HostTests
             check("fill: two numbered text cells continue the step, as in Excel", Text(b, 0, 3, 0) == "item-3" && Text(b, 0, 4, 0) == "item-4", Text(b, 0, 3, 0) + "," + Text(b, 0, 4, 0));
             Call(b, "undo", new { sheet = 0 });
         });
+        Try("agent commands", () =>
+        {
+            // AI agents read and write by Excel address (A1 is the header "Name", B2 holds 1 in the made-up workbook)
+            var r = Call(b, "agent.read", new { range = "A1:B2" });
+            check("agent: reads by Excel address", r.GetProperty("values")[0][0].GetString() == "Name" && r.GetProperty("values")[1][1].GetString() == "1", r.ToString());
+            var w = Call(b, "agent.write", new { start = "B2", values = new object[][] { new object[] { 5 }, new object[] { "=B2*2" } } });
+            check("agent: writes a number and a formula", w.GetProperty("written").GetInt32() == 2 && Text(b, 0, 1, 1) == "5" && Text(b, 0, 2, 1) == "10", Text(b, 0, 2, 1));
+            var f = Call(b, "agent.read", new { sheet = 0, range = "B3" });
+            check("agent: a read shows the formula", f.GetProperty("formulas")[0][0].GetString() == "=B2*2", f.ToString());
+            Call(b, "undo", new { sheet = 0 });
+            check("agent: one undo takes the whole write back", Text(b, 0, 1, 1) == "1", Text(b, 0, 1, 1));
+            check("agent: outside the data is refused plainly", Call(b, "agent.write", new { start = "XFD1", values = new[] { new[] { 1 } } }, false).GetString()!.Contains("outside"), "");
+            check("agent: an unknown sheet names the sheets", Call(b, "agent.read", new { sheet = "Nope", range = "A1" }, false).GetString()!.Contains("Sheets:"), "");
+        });
         Try("filter and sort", () =>
         {
             var r = Call(b, "setFilter", new { sheet = 0, col = 1, condition = new { kind = "number", op = "gt", a = 10 } });

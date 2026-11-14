@@ -124,6 +124,26 @@ export class MockHost {
         return () => set!.delete(handler);
     }
 
+    // A pretend Claude Code for the browser preview: it reads two cells, writes one and answers.
+    private agentTimers: ReturnType<typeof setTimeout>[] = [];
+    private agentStart(args: any): any {
+        const steps: [number, any][] = [
+            [200, { kind: "status", text: "Claude Code is working..." }],
+            [700, { kind: "tool", text: "app_status" }],
+            [1200, { kind: "tool", text: "read_range: C2:C11" }],
+            [1700, { kind: "tool", text: "write_range: C12" }],
+            [2000, { kind: "text", text: `Done. I added the total of column C under the data in C12 (=SUM(C2:C11)). The change is not saved yet.\n\nYou asked: ${args?.prompt ?? ""}` }],
+            [2100, { kind: "done", text: "Done in 1.9 s." }],
+        ];
+        this.agentTimers.forEach(clearTimeout);
+        this.agentTimers = steps.map(([ms, e]) => setTimeout(() => {
+            if (e.kind === "done") this.agentTimers = [];
+            if (e.text?.startsWith("Done. I added")) { this.valueEdits.set(this.keyFor(11, 2), { text: "=SUM(C2:C11)", kind: 2, align: 0 }); this.emit("agentChanged", { cmd: "agent.write" }); }
+            this.emit("agent.event", e);
+        }, ms));
+        return { started: true, agent: args?.agent ?? "claude", resumed: !args?.newChat };
+    }
+
     private emit(event: string, payload: any): void {
         const set = this.listeners.get(event);
         if (set) for (const h of set) h({ event, ...payload });
@@ -405,6 +425,14 @@ export class MockHost {
             case "openExternal":
             case "log":
                 return { ok: true };
+            case "agent.status":
+                return { claude: true, codex: false, running: this.agentTimers.length > 0 ? "claude" : null };
+            case "agent.start":
+                return this.agentStart(args);
+            case "agent.stop":
+                this.agentTimers.forEach(clearTimeout); this.agentTimers = [];
+                this.emit("agent.event", { kind: "done", text: "Stopped." });
+                return { stopped: true };
             case "edge":
                 return this.edge(args);
             case "locate":

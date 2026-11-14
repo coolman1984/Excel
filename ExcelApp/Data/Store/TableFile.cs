@@ -78,6 +78,55 @@ public static class TableFile
         if (h.Rows < 0 || h.Columns.Any(c => c.Offset < 16L + n || c.Offset % 8 != 0 || c.Length < 0 || c.Offset > s.Length || c.Length > s.Length - c.Offset)) throw new InvalidDataException("Invalid table section.");
         return new LazyTable(root, relative, h);
     }
+    /// <summary>Reads only the given rows of one column (any order, repeats allowed), one value at a time.</summary>
+    internal static Column ReadRows(FileRoot root, string relative, int rows, ColHeader h, int[] want)
+    {
+        var type = Enum.Parse<ColType>(h.Type, true); int n = want.Length;
+        foreach (int w in want) if ((uint)w >= (uint)rows) throw new ArgumentOutOfRangeException(nameof(want));
+        using var handle = root.OpenHandle(relative); var b = new byte[8];
+        void At(long offset, int count) { if (RandomAccess.Read(handle, b.AsSpan(0, count), offset) != count) throw new EndOfStreamException(); }
+        switch (type)
+        {
+            case ColType.Number: case ColType.Date:
+            {
+                if (h.Length != (long)rows * (h.HasNulls ? 9 : 8)) throw new InvalidDataException("Invalid number section.");
+                var values = new double[n]; bool[]? nulls = h.HasNulls ? new bool[n] : null;
+                for (int i = 0; i < n; i++)
+                {
+                    At(h.Offset + want[i] * 8L, 8); values[i] = BitConverter.ToDouble(b, 0);
+                    if (nulls != null) { At(h.Offset + rows * 8L + want[i], 1); nulls[i] = b[0] != 0; }
+                }
+                return new NumberColumn(h.Name, values, nulls, type);
+            }
+            case ColType.Bool:
+            {
+                if (h.Length != rows) throw new InvalidDataException("Invalid bool section.");
+                var values = new sbyte[n]; for (int i = 0; i < n; i++) { At(h.Offset + want[i], 1); values[i] = (sbyte)b[0]; }
+                return new BoolColumn(h.Name, values);
+            }
+            case ColType.Text:
+            {
+                if (h.Length < (long)rows * 4 + 4) throw new InvalidDataException("Invalid text section.");
+                var codes = new int[n]; for (int i = 0; i < n; i++) { At(h.Offset + want[i] * 4L, 4); codes[i] = BitConverter.ToInt32(b, 0); }
+                At(h.Offset + rows * 4L, 4); int count = BitConverter.ToInt32(b, 0);
+                if (count != h.DictCount || count < 0 || codes.Any(x => x < -1 || x >= count)) throw new InvalidDataException("Invalid dictionary.");
+                // walk the dictionary once and decode only the entries these rows use
+                var used = new Dictionary<int, int>(); var dict = new List<string>();
+                foreach (int c in codes) if (c >= 0 && !used.ContainsKey(c)) used[c] = -1;
+                long pos = h.Offset + rows * 4L + 4, end = h.Offset + h.Length;
+                for (int d = 0; d < count && used.Values.Contains(-1); d++)
+                {
+                    At(pos, 4); int len = BitConverter.ToInt32(b, 0); pos += 4;
+                    if (len < 0 || len > end - pos) throw new InvalidDataException("Invalid dictionary entry.");
+                    if (used.ContainsKey(d)) { var bytes = new byte[len]; if (RandomAccess.Read(handle, bytes, pos) != len) throw new EndOfStreamException(); used[d] = dict.Count; dict.Add(Encoding.UTF8.GetString(bytes)); }
+                    pos += len;
+                }
+                for (int i = 0; i < n; i++) codes[i] = codes[i] < 0 ? -1 : used[codes[i]];
+                return new TextColumn(h.Name, codes, dict.ToArray());
+            }
+            default: throw new InvalidDataException("Unknown column type.");
+        }
+    }
     internal static Column ReadColumn(FileRoot root, string relative, int rows, ColHeader h)
     {
         using var s = root.OpenRead(relative); s.Position = h.Offset; using var r = new BinaryReader(s, Encoding.UTF8, true);
@@ -110,6 +159,27 @@ public sealed class LazyTable
     public int Rows => header.Rows;
     public IReadOnlyList<ColumnInfo> Columns => header.Columns.Select(c=>new ColumnInfo(c.Name,Enum.Parse<ColType>(c.Type,true))).ToArray();
     internal LazyTable(FileRoot root, string path, TableFile.Header header) { this.root = root; this.path = path; this.header = header; }
+    /// <summary>Only these rows (in this order) of these columns. Few rows are read one value at a time; many rows read whole columns.</summary>
+    public Table LoadRows(IEnumerable<string>? columns, int[] rows)
+    {
+        var selected = columns == null ? null : new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
+        bool whole = rows.LongLength * 16 >= header.Rows;
+        var result = new List<Column>();
+        lock (gate)
+            for (int i = 0; i < header.Columns.Count; i++)
+            {
+                var col = header.Columns[i]; if (selected != null && !selected.Contains(col.Name)) continue;
+                try
+                {
+                    if (cache.TryGetValue(i, out var have)) { result.Add(Query.Engine.Gather(have, rows)); continue; }
+                    if (whole) { var full = TableFile.ReadColumn(root, path, header.Rows, col); cache[i] = full; result.Add(Query.Engine.Gather(full, rows)); }
+                    else result.Add(TableFile.ReadRows(root, path, header.Rows, col, rows));
+                }
+                catch (FileNotFoundException) { throw; }
+                catch (Exception e) when (TableFile.IsDamage(e)) { throw new UserError("The stored table is damaged or could not be opened."); }
+            }
+        return new Table(header.Name, result);
+    }
     public Table Load(IEnumerable<string>? columns = null)
     {
         var selected = columns == null ? null : new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
